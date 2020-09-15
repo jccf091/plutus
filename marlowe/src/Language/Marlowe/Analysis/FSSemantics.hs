@@ -17,6 +17,7 @@ import qualified Data.SBV.Maybe             as SM
 import qualified Data.SBV.Tuple             as ST
 import           Data.Set                   (Set)
 import qualified Data.Set                   as S
+import           Data.Traversable           (for)
 import           Language.Marlowe.Semantics
 import qualified Language.PlutusTx.AssocMap as AssocMap
 import qualified Language.PlutusTx.Prelude  as P
@@ -476,22 +477,20 @@ wrapper oa c st maybeState = do ess <- mkInitialSymState st maybeState
 
 -- It generates a list of variable names for the variables that conform paramTrace.
 -- The list will account for the given number of transactions (four vars per transaction).
-generateLabels :: Integer -> [String]
-generateLabels = go 1
-  where go :: Integer -> Integer -> [String]
-        go n m
-         | n > m = []
-         | otherwise = (action_label ++ "minSlot"):
-                       (action_label ++ "maxSlot"):
-                       (action_label ++ "value"):
-                       (action_label ++ "branch"):
-                       go (n + 1) m
-            where action_label = "action_" ++ show n ++ "_"
+generateLabels :: Integer -> [(String, String, String, String)]
+generateLabels n = foldMap asdf [1..n]
+  where
+    asdf :: Integer -> [(String, String, String, String)]
+    asdf n = [(action_label ++ "minSlot",
+               action_label ++ "maxSlot",
+               action_label ++ "value",
+               action_label ++ "branch")]
+      where action_label = "action_" ++ show n ++ "_"
 
 -- Takes a list of variable names for the paramTrace and generates the list of symbolic
 -- variables. It returns the list of symbolic variables generated (list of 4-uples).
-generateParameters :: [String] -> Symbolic [(SInteger, SInteger, SInteger, SInteger)]
-generateParameters (sl:sh:v:b:t) =
+generateParameters :: [(String, String, String, String)] -> Symbolic [(SInteger, SInteger, SInteger, SInteger)]
+generateParameters ((sl, sh, v, b) : t) =
    do isl <- sInteger sl
       ish <- sInteger sh
       iv <- sInteger v
@@ -499,21 +498,19 @@ generateParameters (sl:sh:v:b:t) =
       rest <- generateParameters t
       return ((isl, ish, iv, ib):rest)
 generateParameters [] = return []
-generateParameters _ = error "Wrong number of labels generated"
 
 -- Takes the list of paramTrace variable names and the list of mappings of these
 -- names to concrete values, and reconstructs a concrete list of 4-uples of the ordered
 -- concrete values.
-groupResult :: [String] -> Map String Integer -> [(Integer, Integer, Integer, Integer)]
-groupResult (sl:sh:v:b:t) mappings =
+groupResult :: [(String, String, String, String)] -> Map String Integer -> [(Integer, Integer, Integer, Integer)]
+groupResult ((sl, sh, v, b) : t) mappings =
     if ib == -1 then []
-    else (isl, ish, iv, ib):groupResult t mappings
+    else (isl, ish, iv, ib) : groupResult t mappings
   where (Just isl) = M.lookup sl mappings
         (Just ish) = M.lookup sh mappings
         (Just iv) = M.lookup v mappings
         (Just ib) = M.lookup b mappings
 groupResult [] _ = []
-groupResult _ _ = error "Wrong number of labels generated"
 
 -- Reconstructs an input from a Case list a Case position and a value (deposit amount or
 -- chosen value)
@@ -532,19 +529,19 @@ caseToInput (Case h _:t) c v
 -- transaction was not useless. It assumes the transaction is either valid or useless,
 -- other errors would mean the counterexample is not valid.
 -- Input is passed as a combination and function from input list to transaction input and
--- input list for convenience. The list of 4-uples is passed through because it is used
+-- input list for convenience. The list of 4-tuples is passed through because it is used
 -- to recursively call executeAndInterpret (co-recursive funtion).
 computeAndContinue :: MarloweFFI -> ([Input] -> TransactionInput) -> [Input] -> State -> Contract
                    -> [(Integer, Integer, Integer, Integer)]
                    -> [([TransactionInput], [TransactionWarning])]
-computeAndContinue ffi transaction inps sta cont t =
-  case computeTransaction ffi (transaction inps) sta cont of
-    Error TEUselessTransaction -> executeAndInterpret ffi sta t cont
-    TransactionOutput { txOutWarnings = war
-                      , txOutState = newSta
-                      , txOutContract = newCont}
-                          -> ([transaction inps], war)
-                             :executeAndInterpret ffi newSta t newCont
+computeAndContinue ffi transaction inputs state contract t =
+  case computeTransaction ffi (transaction inputs) state contract of
+    Error TEUselessTransaction -> executeAndInterpret ffi state t contract
+    TransactionOutput { txOutWarnings = warnings
+                      , txOutState = newState
+                      , txOutContract = newContract}
+                          -> ([transaction inputs], warnings)
+                             :executeAndInterpret ffi newState t newContract
 
 -- Takes a list of 4-uples (and state and contract) and interprets it as a list of
 -- transactions and also computes the resulting list of warnings.
@@ -582,7 +579,7 @@ interpretResult ffi t@((l, _, _, _):_) c maybeState = (Slot l, tin, twa)
 
 -- It interprets the counter example found by SBV (SMTModel), given the contract,
 -- and initial state (optional), and the list of variables used.
-extractCounterExample :: MarloweFFI -> SMTModel -> Contract -> Maybe State -> [String]
+extractCounterExample :: MarloweFFI -> SMTModel -> Contract -> Maybe State -> [(String, String, String, String)]
                       -> (Slot, [TransactionInput], [TransactionWarning])
 extractCounterExample ffi smtModel cont maybeState maps = interpretedResult
   where assocs = map (\(a, b) -> (a, fromCV b :: Integer)) $ modelAssocs smtModel
@@ -590,7 +587,7 @@ extractCounterExample ffi smtModel cont maybeState maps = interpretedResult
         interpretedResult = interpretResult ffi (reverse counterExample) cont maybeState
 
 -- Wrapper function that carries the static analysis and interprets the result.
--- It generates variables, runs SBV, and it interprets the result in Marlow terms.
+-- It generates variables, runs SBV, and it interprets the result in Marlowe terms.
 warningsTraceCustom :: MarloweFFI -> Bool
               -> Contract
               -> Maybe State
