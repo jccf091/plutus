@@ -452,9 +452,9 @@ data FFArg  = ArgValueId (ValueId)
 
 
 data FFInfo = FFInfo
-    { ffiRangeBounds :: [Bound]
+    { ffiRangeBounds      :: [Bound]
     , ffiOutOfBoundsValue :: Integer
-    , ffiFunction    :: State -> Contract -> [FFArg] -> Integer
+    , ffiFunction         :: State -> Contract -> [FFArg] -> Integer
     }
 
 

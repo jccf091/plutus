@@ -7,7 +7,6 @@
 module Language.Marlowe.Analysis.FSSemantics where
 
 import           Control.Monad
-import           Control.Monad.IO.Class       (liftIO)
 import           Data.List                  (foldl', genericIndex)
 import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as M
@@ -369,47 +368,53 @@ onlyAssertionsPatch b p1 p2
 -- 2. It has issued a warning (as indicated by hasErr)
 isValidAndFailsAux :: Bool -> SBool -> Contract -> SymState
                    -> Symbolic SBool
-isValidAndFailsAux oa hasErr Close sState =
-  return (hasErr .&& convertToSymbolicTrace ((lowSlot sState, highSlot sState,
+isValidAndFailsAux oa hasErr contract sState = case contract of
+    Close ->
+        return (hasErr .&& convertToSymbolicTrace ((lowSlot sState, highSlot sState,
                                               symInput sState, whenPos sState)
                                               :traces sState) (paramTrace sState))
-isValidAndFailsAux oa hasErr (Pay accId payee token val cont) sState =
-  do let concVal = symEvalVal val sState
-     let originalMoney = M.findWithDefault 0 (accId, token) (symAccounts sState)
-     let remainingMoneyInAccount = originalMoney - smax (literal 0) concVal
-     let newAccs = M.insert (accId, token) (smax (literal 0) remainingMoneyInAccount)
-                                                 (symAccounts sState)
-     let finalSState = sState { symAccounts =
-           case payee of
-             (Account destAccId) ->
-                M.insert (destAccId, token)
-                         (smin originalMoney (smax (literal 0) concVal)
-                            + M.findWithDefault 0 (destAccId, token) newAccs)
-                         newAccs
-             _ -> newAccs }
-     isValidAndFailsAux oa (onlyAssertionsPatch
+    Pay accId payee token val cont -> isValidAndFailsAux oa newHasError cont finalSState
+      where
+        concVal = symEvalVal val sState
+        originalMoney = M.findWithDefault 0 (accId, token) (symAccounts sState)
+        remainingMoneyInAccount = originalMoney - smax (literal 0) concVal
+        newAccs = M.insert (accId, token) (smax (literal 0) remainingMoneyInAccount)
+                                                    (symAccounts sState)
+        newAccs' = case payee of
+                Account destAccId ->
+                    M.insert (destAccId, token)
+                            (smin originalMoney (smax (literal 0) concVal)
+                                + M.findWithDefault 0 (destAccId, token) newAccs)
+                            newAccs
+                _ -> newAccs
+        finalSState = sState { symAccounts = newAccs' }
+        newHasError = onlyAssertionsPatch
                               oa
                               ((remainingMoneyInAccount .< 0) -- Partial payment
                                .|| (concVal .<= 0)) -- Non-positive payment
-                              hasErr) cont finalSState
-isValidAndFailsAux oa hasErr (If obs cont1 cont2) sState =
-  do let obsVal = symEvalObs obs sState
-     contVal1 <- isValidAndFailsAux oa hasErr cont1 sState
-     contVal2 <- isValidAndFailsAux oa hasErr cont2 sState
-     return (ite obsVal contVal1 contVal2)
-isValidAndFailsAux oa hasErr (When list timeout cont) sState =
-  isValidAndFailsWhen oa hasErr list timeout cont (const $ const sFalse) sState 1
-isValidAndFailsAux oa hasErr (Let valId val cont) sState =
-  do let concVal = symEvalVal val sState
-     let newBVMap = M.insert valId concVal (symBoundValues sState)
-     let newSState = sState { symBoundValues = newBVMap }
-     isValidAndFailsAux oa (onlyAssertionsPatch
+                              hasErr
+
+    If obs cont1 cont2 -> do
+        let obsVal = symEvalObs obs sState
+        contVal1 <- isValidAndFailsAux oa hasErr cont1 sState
+        contVal2 <- isValidAndFailsAux oa hasErr cont2 sState
+        return (ite obsVal contVal1 contVal2)
+
+    When list timeout cont ->
+        isValidAndFailsWhen oa hasErr list timeout cont (const $ const sFalse) sState 1
+
+    Let valId val cont -> do
+        let concVal = symEvalVal val sState
+        let newBVMap = M.insert valId concVal (symBoundValues sState)
+        let newSState = sState { symBoundValues = newBVMap }
+        let newHasError = onlyAssertionsPatch
                               oa
                               (literal (M.member valId (symBoundValues sState))) -- Shadowed definition
-                              hasErr) cont newSState
-isValidAndFailsAux oa hasErr (Assert obs cont) sState =
-  isValidAndFailsAux oa (hasErr .|| sNot obsVal) cont sState
-  where obsVal = symEvalObs obs sState
+                              hasErr
+        isValidAndFailsAux oa newHasError cont newSState
+
+    Assert obs cont -> isValidAndFailsAux oa (hasErr .|| sNot obsVal) cont sState
+      where obsVal = symEvalObs obs sState
 
 -- Returns sTrue iif the given sinteger is in the list of bounds
 ensureBounds :: SInteger -> [Bound] -> SBool
@@ -520,14 +525,14 @@ isValidAndFailsWhen oa hasErr (Case (Notify obs) cont:rest)
 -- necessary number of transactions for exploring the whole contract. This bound
 -- has been proven in TransactionBound.thy
 countWhens :: Contract -> Integer
-countWhens Close               = 0
-countWhens (Pay uv uw ux uy c) = countWhens c
-countWhens (If uz c c2)        = max (countWhens c) (countWhens c2)
-countWhens (When cl t c)       = 1 + max (countWhensCaseList cl) (countWhens c)
-countWhens (Let va vb c)       = countWhens c
-countWhens (Assert o c)        = countWhens c
-
--- Same as countWhens but it starts with a Case list
+countWhens contract = case contract of
+    Close             -> 0
+    Pay uv uw ux uy c -> countWhens c
+    If uz c c2        -> max (countWhens c) (countWhens c2)
+    When cl t c       -> 1 + max (countWhensCaseList cl) (countWhens c)
+    Let va vb c       -> countWhens c
+    Assert o c        -> countWhens c
+  where
 countWhensCaseList :: [Case Contract] -> Integer
 countWhensCaseList (Case uu c : tail) = max (countWhens c) (countWhensCaseList tail)
 countWhensCaseList []                 = 0
@@ -538,23 +543,22 @@ countWhensCaseList []                 = 0
 -- this function because then we would have to return a symbolic list that would make
 -- the whole process slower. It is meant to be used just with SBV, with a symbolic
 -- paramTrace, and we use the symbolic paramTrace to know which is the counterexample.
-wrapper :: Bool -> MarloweFFI -> Contract -> [(SInteger, SInteger, SInteger, SInteger)] -> Maybe State
+contractIsGood :: Bool -> MarloweFFI -> Contract -> [(SInteger, SInteger, SInteger, SInteger)] -> Maybe State
         -> Symbolic SBool
-wrapper oa ffi contract st maybeState = do
+contractIsGood oa ffi contract st maybeState = do
     ess <- mkInitialSymState ffi st contract maybeState
-    liftIO $ print ess
     isValidAndFailsAux oa sFalse contract ess
 
 -- It generates a list of variable names for the variables that conform paramTrace.
 -- The list will account for the given number of transactions (four vars per transaction).
 generateLabels :: Integer -> [(String, String, String, String)]
-generateLabels n = foldMap asdf [1..n]
+generateLabels n = foldMap genLabels [1..n]
   where
-    asdf :: Integer -> [(String, String, String, String)]
-    asdf n = [(action_label ++ "minSlot",
-               action_label ++ "maxSlot",
-               action_label ++ "value",
-               action_label ++ "branch")]
+    genLabels :: Integer -> [(String, String, String, String)]
+    genLabels n = [(action_label ++ "minSlot",
+                    action_label ++ "maxSlot",
+                    action_label ++ "value",
+                    action_label ++ "branch")]
       where action_label = "action_" ++ show n ++ "_"
 
 -- Takes a list of variable names for the paramTrace and generates the list of symbolic
@@ -663,19 +667,21 @@ warningsTraceCustom :: MarloweFFI -> Bool
               -> Maybe State
               -> IO (Either ThmResult
                             (Maybe (Slot, [TransactionInput], [TransactionWarning])))
-warningsTraceCustom ffi onlyAssertions con maybeState =
-    do thmRes@(ThmResult result) <- satCommand
-       return (case result of
-                 Unsatisfiable _ _ -> Right Nothing
-                 Satisfiable _ smtModel ->
-                    Right (Just (extractCounterExample ffi smtModel con maybeState params))
-                 _ -> Left thmRes)
-  where maxActs = 1 + countWhens con
-        params = generateLabels maxActs
-        property = do v <- generateParameters params
-                      r <- wrapper onlyAssertions ffi con v maybeState
-                      return (sNot r)
-        satCommand = proveWith z3 property
+warningsTraceCustom ffi onlyAssertions contract maybeState = do
+    thmRes@(ThmResult result) <- proveWith z3 counterExampleExists
+    case result of
+        Unsatisfiable _ _ ->
+            return $ Right Nothing
+        Satisfiable _ smtModel ->
+            return $ Right (Just (extractCounterExample ffi smtModel contract maybeState params))
+        _ -> return $ Left thmRes
+  where
+    maxActs = 1 + countWhens contract
+    params = generateLabels maxActs
+    counterExampleExists = do
+        v <- generateParameters params
+        good <- contractIsGood onlyAssertions ffi contract v maybeState
+        return (sNot good)
 
 -- Like warningsTraceCustom but checks all warnings (including assertions)
 warningsTraceWithState :: MarloweFFI -> Contract

@@ -28,7 +28,7 @@ import           Data.Aeson                            (decode, encode)
 import qualified Data.ByteString                       as BS
 import           Data.Either                           (isRight)
 import           Data.Ratio                            ((%))
-import qualified Data.Set                   as S
+import qualified Data.Set                              as S
 import           Data.String
 
 import qualified Codec.CBOR.Write                      as Write
@@ -320,7 +320,7 @@ ffiTest = do
     res <- warningsTrace testFFI contract
     case res of
         Right Nothing -> return ()
-        r -> assertFailure (show r)
+        r             -> assertFailure (show r)
   where
     eval = evalValue (Environment { slotInterval = (Slot 10, Slot 1000), marloweFFI = testFFI })
 
