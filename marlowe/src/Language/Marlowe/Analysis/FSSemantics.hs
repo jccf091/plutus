@@ -3,13 +3,14 @@
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
 {-# OPTIONS_GHC -Wno-unused-matches #-}
-{-# OPTIONS_GHC -Wno-unused-imports #-}
 module Language.Marlowe.Analysis.FSSemantics where
 
 import           Control.Monad
 import           Data.List                  (foldl', genericIndex)
 import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as M
+import           Data.Aeson                                      (FromJSON, ToJSON)
+import           GHC.Generics                                    (Generic)
 import           Data.Maybe                 (isNothing)
 import           Data.Monoid
 import           Data.SBV
@@ -23,7 +24,6 @@ import qualified Data.Set                   as S
 import           Data.Traversable           (for)
 import           Language.Marlowe.Semantics
 import qualified Language.PlutusTx.AssocMap as AssocMap
-import qualified Language.PlutusTx.Prelude  as P
 import qualified Language.PlutusTx.Ratio    as P
 import           Ledger                     (Slot (..))
 
@@ -79,6 +79,23 @@ data SymState = SymState { lowSlot        :: SInteger
                          , symBoundValues :: Map ValueId SInteger
                          , symFFICalls    :: Map Integer SInteger
                          } deriving (Show)
+
+data CounterExample = MkCounterExample
+    { ceInitialSlot         :: Slot
+    , ceTransactions        :: [TransactionInput]
+    , ceWarnings :: [TransactionWarning]
+    }
+  deriving (Show)
+
+data AnalysisResult = ValidContract
+                    | CounterExample CounterExample
+                    | AnalysisError ThmResult
+  deriving (Show)
+
+isContractValid :: AnalysisResult -> Bool
+isContractValid ValidContract = True
+isContractValid _ = False
+
 
 -- It generates a valid symbolic interval with lower bound ms (if provided)
 generateSymbolicInterval :: Maybe Integer -> Symbolic (SInteger, SInteger)
@@ -564,14 +581,12 @@ generateLabels n = foldMap genLabels [1..n]
 -- Takes a list of variable names for the paramTrace and generates the list of symbolic
 -- variables. It returns the list of symbolic variables generated (list of 4-uples).
 generateParameters :: [(String, String, String, String)] -> Symbolic [(SInteger, SInteger, SInteger, SInteger)]
-generateParameters ((sl, sh, v, b) : t) =
-   do isl <- sInteger sl
-      ish <- sInteger sh
-      iv <- sInteger v
-      ib <- sInteger b
-      rest <- generateParameters t
-      return ((isl, ish, iv, ib):rest)
-generateParameters [] = return []
+generateParameters labels = forM labels $ \(sl, sh, v, b) -> do
+    isl <- sInteger sl
+    ish <- sInteger sh
+    iv <- sInteger v
+    ib <- sInteger b
+    return (isl, ish, iv, ib)
 
 -- Takes the list of paramTrace variable names and the list of mappings of these
 -- names to concrete values, and reconstructs a concrete list of 4-uples of the ordered
@@ -641,9 +656,13 @@ executeAndInterpret ffi sta ((l, h, v, b):t) cont
 -- It wraps executeAndInterpret so that it takes an optional State, and also
 -- combines the results of executeAndInterpret in one single tuple.
 interpretResult :: MarloweFFI -> [(Integer, Integer, Integer, Integer)] -> Contract -> Maybe State
-                -> (Slot, [TransactionInput], [TransactionWarning])
+                -> CounterExample
 interpretResult _ [] _ _ = error "Empty result"
-interpretResult ffi t@((l, _, _, _):_) c maybeState = (Slot l, tin, twa)
+interpretResult ffi t@((l, _, _, _):_) c maybeState =
+    MkCounterExample { ceInitialSlot = Slot l
+                     , ceTransactions = tin
+                     , ceWarnings = twa
+                     }
    where (tin, twa) = foldl' (\(accInp, accWarn) (elemInp, elemWarn) ->
                                  (accInp ++ elemInp, accWarn ++ elemWarn)) ([], []) $
                              executeAndInterpret ffi initialState t c
@@ -654,7 +673,7 @@ interpretResult ffi t@((l, _, _, _):_) c maybeState = (Slot l, tin, twa)
 -- It interprets the counter example found by SBV (SMTModel), given the contract,
 -- and initial state (optional), and the list of variables used.
 extractCounterExample :: MarloweFFI -> SMTModel -> Contract -> Maybe State -> [(String, String, String, String)]
-                      -> (Slot, [TransactionInput], [TransactionWarning])
+                      -> CounterExample
 extractCounterExample ffi smtModel cont maybeState maps = interpretedResult
   where assocs = map (\(a, b) -> (a, fromCV b :: Integer)) $ modelAssocs smtModel
         counterExample = groupResult maps (M.fromList assocs)
@@ -665,42 +684,38 @@ extractCounterExample ffi smtModel cont maybeState maps = interpretedResult
 warningsTraceCustom :: MarloweFFI -> Bool
               -> Contract
               -> Maybe State
-              -> IO (Either ThmResult
-                            (Maybe (Slot, [TransactionInput], [TransactionWarning])))
+              -> IO AnalysisResult
 warningsTraceCustom ffi onlyAssertions contract maybeState = do
     thmRes@(ThmResult result) <- proveWith z3 counterExampleExists
     case result of
-        Unsatisfiable _ _ ->
-            return $ Right Nothing
-        Satisfiable _ smtModel ->
-            return $ Right (Just (extractCounterExample ffi smtModel contract maybeState params))
-        _ -> return $ Left thmRes
+        Unsatisfiable _ _ -> return ValidContract
+        Satisfiable _ smtModel -> do
+            let counterExample = extractCounterExample ffi smtModel contract maybeState labels
+            return $ CounterExample counterExample
+        _ -> return $ AnalysisError thmRes
   where
     maxActs = 1 + countWhens contract
-    params = generateLabels maxActs
+    labels = generateLabels maxActs
     counterExampleExists = do
-        v <- generateParameters params
-        good <- contractIsGood onlyAssertions ffi contract v maybeState
+        params <- generateParameters labels
+        good <- contractIsGood onlyAssertions ffi contract params maybeState
         return (sNot good)
 
 -- Like warningsTraceCustom but checks all warnings (including assertions)
 warningsTraceWithState :: MarloweFFI -> Contract
               -> Maybe State
-              -> IO (Either ThmResult
-                            (Maybe (Slot, [TransactionInput], [TransactionWarning])))
+              -> IO AnalysisResult
 warningsTraceWithState ffi = warningsTraceCustom ffi False
 
 -- Like warningsTraceCustom but only checks assertions.
 onlyAssertionsWithState :: MarloweFFI -> Contract
               -> Maybe State
-              -> IO (Either ThmResult
-                            (Maybe (Slot, [TransactionInput], [TransactionWarning])))
+              -> IO AnalysisResult
 onlyAssertionsWithState ffi = warningsTraceCustom ffi True
 
 -- Like warningsTraceWithState but without initialState.
 warningsTrace :: MarloweFFI -> Contract
-              -> IO (Either ThmResult
-                            (Maybe (Slot, [TransactionInput], [TransactionWarning])))
+              -> IO AnalysisResult
 warningsTrace ffi con = warningsTraceWithState ffi con Nothing
 
 

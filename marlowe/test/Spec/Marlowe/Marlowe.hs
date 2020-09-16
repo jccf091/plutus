@@ -307,7 +307,7 @@ mulAnalysisTest = do
         contract = If (muliply `ValueGE` Constant 10000) Close (Pay aliceAcc (Party alicePk) ada (Constant (-100)) Close)
     result <- warningsTrace defaultMarloweFFI contract
     --print result
-    assertBool "Analysis ok" $ isRight result
+    assertBool "Analysis ok" $ isContractValid result
 
 
 ffiTest :: IO ()
@@ -319,7 +319,7 @@ ffiTest = do
         contract = Pay aliceAcc (Party "bob") ada (Call 0 []) Close
     res <- warningsTrace testFFI contract
     case res of
-        Right Nothing -> return ()
+        ValidContract -> return ()
         r             -> assertFailure (show r)
   where
     eval = evalValue (Environment { slotInterval = (Slot 10, Slot 1000), marloweFFI = testFFI })
@@ -392,29 +392,39 @@ interpretContractString :: MonadInterpreter m => String -> m Contract
 interpretContractString contractStr = interpret contractStr (as :: Contract)
 
 
+hasCounterExample :: AnalysisResult -> Bool
+hasCounterExample (CounterExample _) = True
+hasCounterExample _ = False
+
 noFalsePositivesForContract :: Contract -> Property
-noFalsePositivesForContract cont =
-  unsafePerformIO (do res <- catch (wrapLeft $ warningsTrace defaultMarloweFFI cont)
-                                   (\exc -> return $ Left (Left (exc :: SomeException)))
-                      return (case res of
-                                Left err -> counterexample (show err) False
-                                Right answer ->
-                                   tabulate "Has counterexample" [show (isJust answer)]
-                                   (case answer of
-                                      Nothing ->
-                                         tabulate "Is empty contract" [show (cont == Close)]
-                                                  True
-                                      Just (is, li, warns) ->
-                                         counterexample ("Trace: " ++ show (is, li)) $
-                                         tabulate "Number of warnings" [show (length warns)]
-                                                  (warns =/= []))))
+noFalsePositivesForContract cont = unsafePerformIO $ do
+    res <- catch (Right <$> warningsTrace defaultMarloweFFI cont)
+                 (\exc -> return $ Left (exc :: SomeException))
+    case res of
+        Left err -> return $ counterexample (show err) False
+        Right answer -> return $ tabulate "Has counterexample" [show (hasCounterExample answer)]
+                (case answer of
+                    ValidContract ->
+                        tabulate "Is empty contract" [show (cont == Close)]
+                                True
+                    CounterExample (MkCounterExample{ceInitialSlot,ceTransactions,ceWarnings}) ->
+                        counterexample ("Trace: " ++ show (ceInitialSlot, ceTransactions)) $
+                            tabulate "Number of warnings" [show (length ceWarnings)] (ceWarnings =/= []))
 
 
 wrapLeft :: IO (Either a b) -> IO (Either (Either c a) b)
-wrapLeft r = do tempRes <- r
-                return (case tempRes of
-                          Left x  -> Left (Right x)
-                          Right y -> Right y)
+wrapLeft r = do
+    tempRes <- r
+    return (case tempRes of
+                Left x  -> Left (Right x)
+                Right y -> Right y)
+
+wrapLeft2 :: IO AnalysisResult -> IO (Either (Either c AnalysisResult) AnalysisResult)
+wrapLeft2 r = do
+    tempRes <- r
+    case tempRes of
+        AnalysisError _  -> return $ Left (Right tempRes)
+        y -> return $ Right y
 
 
 prop_noFalsePositives :: Property
@@ -422,25 +432,20 @@ prop_noFalsePositives = forAllShrink contractGen shrinkContract noFalsePositives
 
 
 sameAsOldImplementation :: Contract -> Property
-sameAsOldImplementation cont =
-  unsafePerformIO (do res <- catch (wrapLeft $ warningsTrace defaultMarloweFFI cont)
-                                   (\exc -> return $ Left (Left (exc :: SomeException)))
-                      res2 <- catch (wrapLeft $ OldAnalysis.warningsTrace cont)
-                                    (\exc -> return $ Left (Left (exc :: SomeException)))
-                      return (case (res, res2) of
-                                 (Right Nothing, Right Nothing) ->
-                                    label "No counterexample" True
-                                 (Right (Just _), Right Nothing) ->
-                                    label "Old version couldn't see counterexample" True
-                                 (Right (Just _), Right (Just _)) ->
-                                    label "Both versions found counterexample" True
-                                 (Left _, Left _) ->
-                                    label "Both solvers failed" True
-                                 (Left _, _) ->
-                                    label "Solver for new version failed" True
-                                 (_, Left _) ->
-                                    label "Solver for old version failed" True
-                                 problems -> counterexample (show problems) False))
+sameAsOldImplementation cont = unsafePerformIO $ do
+    res <- catch (wrapLeft2 $ warningsTrace defaultMarloweFFI cont)
+            (\exc -> return $ Left (Left (exc :: SomeException)))
+    res2 <- catch (wrapLeft $ OldAnalysis.warningsTrace cont)
+            (\exc -> return $ Left (Left (exc :: SomeException)))
+    let result = case (res, res2) of
+            (Right ValidContract, Right Nothing) -> label "No counterexample" True
+            (Right (CounterExample _), Right Nothing) -> label "Old version couldn't see counterexample" True
+            (Right (CounterExample _), Right (Just _)) -> label "Both versions found counterexample" True
+            (Left _, Left _) -> label "Both solvers failed" True
+            (Left _, _) -> label "Solver for new version failed" True
+            (_, Left _) -> label "Solver for old version failed" True
+            problems -> counterexample (show problems) False
+    return result
 
 
 runManuallySameAsOldImplementation :: Property
