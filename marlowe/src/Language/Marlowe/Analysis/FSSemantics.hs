@@ -155,9 +155,9 @@ initFFICalls MarloweFFI{unMarloweFFI} contract = do
     asdf _             = mempty
 
     fff m name = case AssocMap.lookup name unMarloweFFI of
-        Just FFInfo{ffiRangeBounds} -> do
+        Just FFInfo{ffiRangeBounds, ffiOutOfBoundsValue} -> do
             value <- sInteger_
-            constrain $ ensureBounds value ffiRangeBounds
+            constrain $ ensureBounds value ffiRangeBounds .|| value .== literal ffiOutOfBoundsValue
             return $ M.insert name value m
         Nothing -> return $ M.insert name (literal 0) m
 

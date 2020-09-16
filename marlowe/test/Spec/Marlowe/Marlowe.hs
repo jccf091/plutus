@@ -313,24 +313,22 @@ mulAnalysisTest = do
 ffiTest :: IO ()
 ffiTest = do
     assertEqual "" 42 $ eval (emptyState (Slot 10)) Close (Call 0 [ArgInteger 42])
-    assertEqual "Should be out of bounds"  0 $ eval (emptyState (Slot 10)) Close (Call 0 [ArgInteger 41])
+    assertEqual "Should be out of bounds"  12 $ eval (emptyState (Slot 10)) Close (Call 0 [ArgInteger 41])
     let alicePk = PK $ pubKeyHash $ walletPubKey alice
         aliceAcc = AccountId 0 alicePk
-        contract = If FalseObs Close (Pay aliceAcc (Party alicePk) ada (Constant (-100)) Close)
-    let calls = foldMapContractValue asdf contract
-    -- assertEqual "" mempty calls
-    result <- warningsTrace testFFI contract
-    assertBool "Analysis ok" $ isRight result
+        contract = Pay aliceAcc (Party "bob") ada (Call 0 []) Close
+    res <- warningsTrace testFFI contract
+    case res of
+        Right Nothing -> return ()
+        r -> assertFailure (show r)
   where
     eval = evalValue (Environment { slotInterval = (Slot 10, Slot 1000), marloweFFI = testFFI })
-    asdf (Call name _) = S.singleton name
-    asdf _             = mempty
 
 
 {-# INLINABLE testFFI #-}
 testFFI :: MarloweFFI
 testFFI = MarloweFFI (AssocMap.fromList
-    [ (0, FFInfo { ffiFunction = identity, ffiRangeBounds = [Bound 42 42] })
+    [ (0, FFInfo { ffiFunction = identity, ffiRangeBounds = [Bound 42 42], ffiOutOfBoundsValue = 12 })
     ])
 
 
