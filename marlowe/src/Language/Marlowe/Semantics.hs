@@ -51,8 +51,8 @@ import           Data.Aeson.Types           hiding (Error, Value)
 import           Data.ByteString.Lazy       (fromStrict, toStrict)
 import qualified Data.Foldable              as F
 --import           Data.Scientific            (Scientific, floatingOrInteger)
-import           Data.Text                  (Text, pack, unpack)
 import           Data.List                  (intercalate)
+import           Data.Text                  (Text, pack, unpack)
 import           Data.Text.Encoding         (decodeUtf8, encodeUtf8)
 import           Deriving.Aeson
 import           Language.Marlowe.Pretty    (Pretty (..))
@@ -61,7 +61,6 @@ import           Language.PlutusTx.AssocMap (Map)
 import qualified Language.PlutusTx.AssocMap as Map
 import           Language.PlutusTx.Lift     (makeLift)
 import           Language.PlutusTx.Prelude  hiding ((<$>), (<*>), (<>))
-import           Language.PlutusTx.List
 import           Language.PlutusTx.Ratio    (Ratio, denominator, numerator)
 import           Ledger                     (PubKeyHash (..), Slot (..), ValidatorHash)
 import           Ledger.Validation
@@ -454,7 +453,7 @@ data FFArg  = ArgValueId (ValueId)
 
 data FFInfo = FFInfo
     { ffiRangeBounds :: [Bound]
-    , ffiFunction :: State -> Contract -> [FFArg] -> Integer
+    , ffiFunction    :: State -> Contract -> [FFArg] -> Integer
     }
 
 
@@ -1021,6 +1020,10 @@ instance ToJSON (Value Observation) where
       [ "if" .= obs
       , "then" .= tv
       , "else" .= ev
+      ]
+  toJSON (Call name args) = object
+      [ "call" .= name
+      , "args" .= toJSONList (map toJSON args)
       ]
 
 

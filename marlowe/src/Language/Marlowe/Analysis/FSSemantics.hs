@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 {-# OPTIONS_GHC -Wno-name-shadowing #-}
 {-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
 {-# OPTIONS_GHC -Wno-incomplete-patterns #-}
@@ -5,10 +6,13 @@
 {-# OPTIONS_GHC -Wno-unused-imports #-}
 module Language.Marlowe.Analysis.FSSemantics where
 
+import           Control.Monad
+import           Control.Monad.IO.Class       (liftIO)
 import           Data.List                  (foldl', genericIndex)
 import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as M
 import           Data.Maybe                 (isNothing)
+import           Data.Monoid
 import           Data.SBV
 import qualified Data.SBV.Either            as SE
 import           Data.SBV.Internals         (SMTModel (..))
@@ -31,7 +35,7 @@ import           Ledger                     (Slot (..))
 -- Symbolic version of Input (with symbolic value but concrete identifiers)
 data SymInput = SymDeposit AccountId Party Token SInteger
               | SymChoice ChoiceId SInteger
-              | SymNotify
+              | SymNotify deriving (Show)
 
 -- Symbolic version of State:
 -- We keep as much things concrete as possible.
@@ -74,7 +78,8 @@ data SymState = SymState { lowSlot        :: SInteger
                          , symAccounts    :: Map (AccountId, Token) SInteger
                          , symChoices     :: Map ChoiceId SInteger
                          , symBoundValues :: Map ValueId SInteger
-                         }
+                         , symFFICalls    :: Map Integer SInteger
+                         } deriving (Show)
 
 -- It generates a valid symbolic interval with lower bound ms (if provided)
 generateSymbolicInterval :: Maybe Integer -> Symbolic (SInteger, SInteger)
@@ -100,37 +105,98 @@ toSymMap = foldAssocMapWithKey toSymItem mempty
   where toSymItem :: Ord k => SymVal v => Map k (SBV v) -> k -> v -> Map k (SBV v)
         toSymItem acc k v = M.insert k (literal v) acc
 
+
+foldMapContract :: Monoid m
+    => (Contract -> m)
+    -> (Case Contract -> m)
+    -> (Observation -> m)
+    -> (Value Observation -> m)
+    -> Contract -> m
+foldMapContract fcont fcase fobs fvalue contract = case contract of
+    Close                -> asdf
+    Pay _ _ _ value cont -> asdf <> fvalue' value <> go cont
+    If obs cont1 cont2   -> asdf <> fobs' obs <> go cont1 <> go cont2
+    When cases _ cont    -> asdf <> foldMap fcase' cases <> go cont
+    Let _ value cont     -> asdf <> fvalue value <> go cont
+    Assert obs cont      -> asdf <> fobs' obs <> go cont
+  where
+    asdf = fcont contract
+    go = foldMapContract fcont fcase fobs fvalue
+    fcase' cs@(Case _ cont) = fcase cs <> go cont
+    fobs' obs = case obs of
+        AndObs a b  -> fobs obs <> fobs' a <> fobs' b
+        OrObs  a b  -> fobs obs <> fobs' a <> fobs' b
+        NotObs a    -> fobs obs <> fobs' a
+        ValueGE a b -> fobs obs <> fvalue' a <> fvalue' b
+        ValueGT a b -> fobs obs <> fvalue' a <> fvalue' b
+        ValueLT a b -> fobs obs <> fvalue' a <> fvalue' b
+        ValueLE a b -> fobs obs <> fvalue' a <> fvalue' b
+        ValueEQ a b -> fobs obs <> fvalue' a <> fvalue' b
+        _           -> fobs obs
+    fvalue' v = case v of
+        NegValue val -> fvalue v <> fvalue' val
+        AddValue a b -> fvalue v <> fvalue' a <> fvalue' b
+        SubValue a b -> fvalue v <> fvalue' a <> fvalue' b
+        MulValue a b -> fvalue v <> fvalue' a <> fvalue' b
+        Scale _ val  -> fvalue v <> fvalue' val
+        Cond obs a b -> fvalue v <> fobs' obs <> fvalue' a <> fvalue' b
+        _            -> fvalue v
+
+foldMapContractValue :: Monoid m => (Value Observation -> m) -> Contract -> m
+foldMapContractValue = foldMapContract (const mempty) (const mempty) (const mempty)
+
+
+initFFICalls :: MarloweFFI -> Contract -> Symbolic (Map Integer SInteger)
+initFFICalls MarloweFFI{unMarloweFFI} contract = do
+    let calls = foldMapContractValue asdf contract
+    foldM fff mempty calls
+  where
+    asdf (Call name _) = S.singleton name
+    asdf _             = mempty
+
+    fff m name = case AssocMap.lookup name unMarloweFFI of
+        Just FFInfo{ffiRangeBounds} -> do
+            value <- sInteger_
+            constrain $ ensureBounds value ffiRangeBounds
+            return $ M.insert name value m
+        Nothing -> return $ M.insert name (literal 0) m
+
 -- Create initial symbolic state, it takes an optional concrete State to serve
 -- as initial state, this way analysis can be done from a half-executed contract.
 -- First parameter (pt) is the input parameter trace, which is just a fixed length
 -- list of symbolic integers that are matched to trace.
 -- When Nothing is passed as second parameter it acts like emptyState.
-mkInitialSymState :: [(SInteger, SInteger, SInteger, SInteger)] -> Maybe State
+mkInitialSymState :: MarloweFFI -> [(SInteger, SInteger, SInteger, SInteger)] -> Contract -> Maybe State
                   -> Symbolic SymState
-mkInitialSymState pt Nothing = do (ls, hs) <- generateSymbolicInterval Nothing
-                                  return $ SymState { lowSlot = ls
-                                                    , highSlot = hs
-                                                    , traces = []
-                                                    , paramTrace = pt
-                                                    , symInput = Nothing
-                                                    , whenPos = 0
-                                                    , symAccounts = mempty
-                                                    , symChoices = mempty
-                                                    , symBoundValues = mempty }
-mkInitialSymState pt (Just State { accounts = accs
+mkInitialSymState ffi pt contract Nothing = do
+    (ls, hs) <- generateSymbolicInterval Nothing
+    ffiCalls <- initFFICalls ffi contract
+    return $ SymState { lowSlot = ls
+                      , highSlot = hs
+                      , traces = []
+                      , paramTrace = pt
+                      , symInput = Nothing
+                      , whenPos = 0
+                      , symAccounts = mempty
+                      , symChoices = mempty
+                      , symBoundValues = mempty
+                      , symFFICalls = ffiCalls }
+mkInitialSymState ffi pt contract (Just State { accounts = accs
                                  , choices = cho
                                  , boundValues = bVal
-                                 , minSlot = ms }) =
-  do (ls, hs) <- generateSymbolicInterval (Just (getSlot ms))
-     return $ SymState { lowSlot = ls
-                       , highSlot = hs
-                       , traces = []
-                       , paramTrace = pt
-                       , symInput = Nothing
-                       , whenPos = 0
-                       , symAccounts = toSymMap accs
-                       , symChoices = toSymMap cho
-                       , symBoundValues = toSymMap bVal }
+                                 , minSlot = ms }) = do
+    (ls, hs) <- generateSymbolicInterval (Just (getSlot ms))
+    ffiCalls <- initFFICalls ffi contract
+    return $ SymState { lowSlot = ls
+                      , highSlot = hs
+                      , traces = []
+                      , paramTrace = pt
+                      , symInput = Nothing
+                      , whenPos = 0
+                      , symAccounts = toSymMap accs
+                      , symChoices = toSymMap cho
+                      , symBoundValues = toSymMap bVal
+                      , symFFICalls = ffiCalls }
 
 -- It converts a symbolic trace into a list of 4-uples of symbolic integers,
 -- this is a minimalistic representation of the counter-example trace that aims
@@ -189,6 +255,8 @@ symEvalVal (UseValue valId) symState =
 symEvalVal (Cond cond v1 v2) symState = ite (symEvalObs cond symState)
                                             (symEvalVal v1 symState)
                                             (symEvalVal v2 symState)
+symEvalVal (Call name _) symState =
+  M.findWithDefault (literal 0) name (symFFICalls symState)
 
 -- Symbolic version evalObservation
 symEvalObs :: Observation -> SymState -> SBool
@@ -470,10 +538,12 @@ countWhensCaseList []                 = 0
 -- this function because then we would have to return a symbolic list that would make
 -- the whole process slower. It is meant to be used just with SBV, with a symbolic
 -- paramTrace, and we use the symbolic paramTrace to know which is the counterexample.
-wrapper :: Bool -> Contract -> [(SInteger, SInteger, SInteger, SInteger)] -> Maybe State
+wrapper :: Bool -> MarloweFFI -> Contract -> [(SInteger, SInteger, SInteger, SInteger)] -> Maybe State
         -> Symbolic SBool
-wrapper oa c st maybeState = do ess <- mkInitialSymState st maybeState
-                                isValidAndFailsAux oa sFalse c ess
+wrapper oa ffi contract st maybeState = do
+    ess <- mkInitialSymState ffi st contract maybeState
+    liftIO $ print ess
+    isValidAndFailsAux oa sFalse contract ess
 
 -- It generates a list of variable names for the variables that conform paramTrace.
 -- The list will account for the given number of transactions (four vars per transaction).
@@ -603,7 +673,7 @@ warningsTraceCustom ffi onlyAssertions con maybeState =
   where maxActs = 1 + countWhens con
         params = generateLabels maxActs
         property = do v <- generateParameters params
-                      r <- wrapper onlyAssertions con v maybeState
+                      r <- wrapper onlyAssertions ffi con v maybeState
                       return (sNot r)
         satCommand = proveWith z3 property
 
