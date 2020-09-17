@@ -394,7 +394,7 @@ interpretContractString contractStr = interpret contractStr (as :: Contract)
 
 hasCounterExample :: AnalysisResult -> Bool
 hasCounterExample (CounterExample _) = True
-hasCounterExample _ = False
+hasCounterExample _                  = False
 
 noFalsePositivesForContract :: Contract -> Property
 noFalsePositivesForContract cont = unsafePerformIO $ do
@@ -407,8 +407,8 @@ noFalsePositivesForContract cont = unsafePerformIO $ do
                     ValidContract ->
                         tabulate "Is empty contract" [show (cont == Close)]
                                 True
-                    CounterExample (MkCounterExample{ceInitialSlot,ceTransactions,ceWarnings}) ->
-                        counterexample ("Trace: " ++ show (ceInitialSlot, ceTransactions)) $
+                    CounterExample (MkCounterExample{ceInitialSlot,ceTransactionInputs,ceWarnings}) ->
+                        counterexample ("Trace: " ++ show (ceInitialSlot, ceTransactionInputs)) $
                             tabulate "Number of warnings" [show (length ceWarnings)] (ceWarnings =/= []))
 
 
@@ -431,13 +431,13 @@ sameAsOldImplementation cont = unsafePerformIO $ do
     res2 <- catch (wrapLeft $ OldAnalysis.warningsTrace cont)
             (\exc -> return $ Left (Left (exc :: SomeException)))
     let result = case (res, res2) of
-            (ValidContract, Right Nothing) -> label "No counterexample" True
-            (CounterExample _, Right Nothing) -> label "Old version couldn't see counterexample" True
+            (ValidContract, Right Nothing)     -> label "No counterexample" True
+            (CounterExample _, Right Nothing)  -> label "Old version couldn't see counterexample" True
             (CounterExample _, Right (Just _)) -> label "Both versions found counterexample" True
-            (AnalysisError _, Left _) -> label "Both solvers failed" True
-            (AnalysisError _, _) -> label "Solver for new version failed" True
-            (_, Left _) -> label "Solver for old version failed" True
-            problems -> counterexample (show problems) False
+            (AnalysisError _, Left _)          -> label "Both solvers failed" True
+            (AnalysisError _, _)               -> label "Solver for new version failed" True
+            (_, Left _)                        -> label "Solver for old version failed" True
+            problems                           -> counterexample (show problems) False
     return result
 
 

@@ -1,4 +1,4 @@
-{-# LANGUAGE NamedFieldPuns #-}
+{-# LANGUAGE NamedFieldPuns      #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
 module App where
@@ -11,8 +11,8 @@ import           Data.ByteString.Lazy.UTF8             as BSU
 import           Data.Maybe                            (fromMaybe)
 import           Language.Marlowe                      (Contract, Slot (Slot), State, TransactionInput,
                                                         TransactionWarning)
-import           Language.Marlowe.Analysis.FSSemantics (AnalysisResult(..), CounterExample(..), warningsTraceCustom)
-import           Language.Marlowe.Client (defaultMarloweFFI)
+import           Language.Marlowe.Analysis.FSSemantics (AnalysisResult (..), CounterExample (..), warningsTraceCustom)
+import           Language.Marlowe.Client               (defaultMarloweFFI)
 import           Language.Marlowe.Pretty
 import           Marlowe.Symbolic.Types.Request        (Request (Request, callbackUrl, contract, onlyAssertions, state))
 import qualified Marlowe.Symbolic.Types.Request        as Req
@@ -30,10 +30,10 @@ makeResponse :: String ->
 makeResponse u result = case result of
     Left err -> Response { Res.uuid = u, result = Error err }
     Right (AnalysisError err) -> Response { Res.uuid = u, result = Error (show err) }
-    Right (CounterExample MkCounterExample{ceInitialSlot=(Slot sn), ceTransactions, ceWarnings}) ->
+    Right (CounterExample MkCounterExample{ceInitialSlot=(Slot sn), ceTransactionInputs, ceWarnings}) ->
         Response { Res.uuid = u, result = Res.CounterExample
                        { initialSlot = sn
-                       , transactionList = prettyToString ceTransactions
+                       , transactionList = prettyToString ceTransactionInputs
                        , transactionWarning = prettyToString ceWarnings
                        } }
     Right ValidContract -> Response { Res.uuid = u, result = Valid }

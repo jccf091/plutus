@@ -6,11 +6,11 @@
 module Language.Marlowe.Analysis.FSSemantics where
 
 import           Control.Monad
+import           Data.Aeson                 (FromJSON, ToJSON)
+import           Data.Foldable              (fold)
 import           Data.List                  (foldl', genericIndex)
 import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as M
-import           Data.Aeson                                      (FromJSON, ToJSON)
-import           GHC.Generics                                    (Generic)
 import           Data.Maybe                 (isNothing)
 import           Data.Monoid
 import           Data.SBV
@@ -19,9 +19,8 @@ import           Data.SBV.Internals         (SMTModel (..))
 import qualified Data.SBV.List              as SL
 import qualified Data.SBV.Maybe             as SM
 import qualified Data.SBV.Tuple             as ST
-import           Data.Set                   (Set)
 import qualified Data.Set                   as S
-import           Data.Traversable           (for)
+import           GHC.Generics               (Generic)
 import           Language.Marlowe.Semantics
 import qualified Language.PlutusTx.AssocMap as AssocMap
 import qualified Language.PlutusTx.Ratio    as P
@@ -81,9 +80,9 @@ data SymState = SymState { lowSlot        :: SInteger
                          } deriving (Show)
 
 data CounterExample = MkCounterExample
-    { ceInitialSlot         :: Slot
-    , ceTransactions        :: [TransactionInput]
-    , ceWarnings :: [TransactionWarning]
+    { ceInitialSlot       :: Slot
+    , ceTransactionInputs :: [TransactionInput]
+    , ceWarnings          :: [TransactionWarning]
     }
   deriving (Show)
 
@@ -94,7 +93,7 @@ data AnalysisResult = ValidContract
 
 isContractValid :: AnalysisResult -> Bool
 isContractValid ValidContract = True
-isContractValid _ = False
+isContractValid _             = False
 
 
 -- It generates a valid symbolic interval with lower bound ms (if provided)
@@ -661,14 +660,12 @@ executeAndInterpret ffi sta ((l, h, v, b):t) cont
 interpretResult :: MarloweFFI -> [(Integer, Integer, Integer, Integer)] -> Contract -> Maybe State
                 -> CounterExample
 interpretResult _ [] _ _ = error "Empty result"
-interpretResult ffi t@((l, _, _, _):_) c maybeState =
+interpretResult ffi trace@((l, _, _, _):_) contract maybeState =
     MkCounterExample { ceInitialSlot = Slot l
-                     , ceTransactions = tin
+                     , ceTransactionInputs = tin
                      , ceWarnings = twa
                      }
-   where (tin, twa) = foldl' (\(accInp, accWarn) (elemInp, elemWarn) ->
-                                 (accInp ++ elemInp, accWarn ++ elemWarn)) ([], []) $
-                             executeAndInterpret ffi initialState t c
+   where (tin, twa) = fold $ executeAndInterpret ffi initialState trace contract
          initialState = case maybeState of
                           Nothing -> emptyState (Slot l)
                           Just x  -> x
