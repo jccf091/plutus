@@ -129,14 +129,14 @@ foldMapContract :: Monoid m
     -> (Value Observation -> m)
     -> Contract -> m
 foldMapContract fcont fcase fobs fvalue contract = case contract of
-    Close                -> asdf
-    Pay _ _ _ value cont -> asdf <> fvalue' value <> go cont
-    If obs cont1 cont2   -> asdf <> fobs' obs <> go cont1 <> go cont2
-    When cases _ cont    -> asdf <> foldMap fcase' cases <> go cont
-    Let _ value cont     -> asdf <> fvalue value <> go cont
-    Assert obs cont      -> asdf <> fobs' obs <> go cont
+    Close                -> evaledContract
+    Pay _ _ _ value cont -> evaledContract <> fvalue' value <> go cont
+    If obs cont1 cont2   -> evaledContract <> fobs' obs <> go cont1 <> go cont2
+    When cases _ cont    -> evaledContract <> foldMap fcase' cases <> go cont
+    Let _ value cont     -> evaledContract <> fvalue value <> go cont
+    Assert obs cont      -> evaledContract <> fobs' obs <> go cont
   where
-    asdf = fcont contract
+    evaledContract = fcont contract
     go = foldMapContract fcont fcase fobs fvalue
     fcase' cs@(Case _ cont) = fcase cs <> go cont
     fobs' obs = case obs of
@@ -164,13 +164,13 @@ foldMapContractValue = foldMapContract (const mempty) (const mempty) (const memp
 
 initFFICalls :: MarloweFFI -> Contract -> Symbolic (Map Integer SInteger)
 initFFICalls MarloweFFI{unMarloweFFI} contract = do
-    let calls = foldMapContractValue asdf contract
-    foldM fff mempty calls
+    let calls = foldMapContractValue collectFFICalls contract
+    foldM createSymbolicInputForFFICall mempty calls
   where
-    asdf (Call name _) = S.singleton name
-    asdf _             = mempty
+    collectFFICalls (Call name _) = S.singleton name
+    collectFFICalls _             = mempty
 
-    fff m name = case AssocMap.lookup name unMarloweFFI of
+    createSymbolicInputForFFICall m name = case AssocMap.lookup name unMarloweFFI of
         Just (_, FFInfo{ffiRangeBounds, ffiOutOfBoundsValue}) -> do
             value <- sInteger ("call_" ++ show name)
             constrain $ ensureBounds value ffiRangeBounds .|| value .== literal ffiOutOfBoundsValue
