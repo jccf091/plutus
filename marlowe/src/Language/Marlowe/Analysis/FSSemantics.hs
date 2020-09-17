@@ -714,5 +714,3 @@ onlyAssertionsWithState ffi = warningsTraceCustom ffi True
 warningsTrace :: MarloweFFI -> Contract
               -> IO AnalysisResult
 warningsTrace ffi con = warningsTraceWithState ffi con Nothing
-
-
