@@ -89,7 +89,7 @@ data CounterExample = MkCounterExample
 
 data AnalysisResult = ValidContract
                     | CounterExample CounterExample
-                    | AnalysisError ThmResult
+                    | AnalysisError String
   deriving (Show)
 
 isContractValid :: AnalysisResult -> Bool
@@ -695,7 +695,7 @@ warningsTraceCustom ffi onlyAssertions contract maybeState = do
         Satisfiable _ smtModel -> do
             let counterExample = extractCounterExample ffi smtModel contract maybeState labels
             return $ CounterExample counterExample
-        _ -> return $ AnalysisError thmRes
+        _ -> return $ AnalysisError (show thmRes)
   where
     maxActs = 1 + countWhens contract
     labels = generateLabels maxActs

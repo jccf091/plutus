@@ -398,11 +398,11 @@ hasCounterExample _ = False
 
 noFalsePositivesForContract :: Contract -> Property
 noFalsePositivesForContract cont = unsafePerformIO $ do
-    res <- catch (Right <$> warningsTrace defaultMarloweFFI cont)
-                 (\exc -> return $ Left (exc :: SomeException))
+    res <- catch (warningsTrace defaultMarloweFFI cont)
+                 (\exc -> return $ AnalysisError (show (exc :: SomeException)))
     case res of
-        Left err -> return $ counterexample (show err) False
-        Right answer -> return $ tabulate "Has counterexample" [show (hasCounterExample answer)]
+        AnalysisError err -> return $ counterexample err False
+        answer -> return $ tabulate "Has counterexample" [show (hasCounterExample answer)]
                 (case answer of
                     ValidContract ->
                         tabulate "Is empty contract" [show (cont == Close)]
@@ -419,13 +419,6 @@ wrapLeft r = do
                 Left x  -> Left (Right x)
                 Right y -> Right y)
 
-wrapLeft2 :: IO AnalysisResult -> IO (Either (Either c AnalysisResult) AnalysisResult)
-wrapLeft2 r = do
-    tempRes <- r
-    case tempRes of
-        AnalysisError _  -> return $ Left (Right tempRes)
-        y -> return $ Right y
-
 
 prop_noFalsePositives :: Property
 prop_noFalsePositives = forAllShrink contractGen shrinkContract noFalsePositivesForContract
@@ -433,16 +426,16 @@ prop_noFalsePositives = forAllShrink contractGen shrinkContract noFalsePositives
 
 sameAsOldImplementation :: Contract -> Property
 sameAsOldImplementation cont = unsafePerformIO $ do
-    res <- catch (wrapLeft2 $ warningsTrace defaultMarloweFFI cont)
-            (\exc -> return $ Left (Left (exc :: SomeException)))
+    res <- catch (warningsTrace defaultMarloweFFI cont)
+            (\exc -> return $ AnalysisError (show (exc :: SomeException)))
     res2 <- catch (wrapLeft $ OldAnalysis.warningsTrace cont)
             (\exc -> return $ Left (Left (exc :: SomeException)))
     let result = case (res, res2) of
-            (Right ValidContract, Right Nothing) -> label "No counterexample" True
-            (Right (CounterExample _), Right Nothing) -> label "Old version couldn't see counterexample" True
-            (Right (CounterExample _), Right (Just _)) -> label "Both versions found counterexample" True
-            (Left _, Left _) -> label "Both solvers failed" True
-            (Left _, _) -> label "Solver for new version failed" True
+            (ValidContract, Right Nothing) -> label "No counterexample" True
+            (CounterExample _, Right Nothing) -> label "Old version couldn't see counterexample" True
+            (CounterExample _, Right (Just _)) -> label "Both versions found counterexample" True
+            (AnalysisError _, Left _) -> label "Both solvers failed" True
+            (AnalysisError _, _) -> label "Solver for new version failed" True
             (_, Left _) -> label "Solver for old version failed" True
             problems -> counterexample (show problems) False
     return result
