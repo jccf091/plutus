@@ -25,6 +25,7 @@ import           Language.Marlowe.Semantics
 import qualified Language.PlutusTx.AssocMap as AssocMap
 import qualified Language.PlutusTx.Ratio    as P
 import           Ledger                     (Slot (..))
+import Debug.Trace
 
 ---------------------------------------------------
 -- Static analysis logic and symbolic operations --
@@ -171,7 +172,7 @@ initFFICalls MarloweFFI{unMarloweFFI} contract = do
 
     fff m name = case AssocMap.lookup name unMarloweFFI of
         Just (_, FFInfo{ffiRangeBounds, ffiOutOfBoundsValue}) -> do
-            value <- sInteger_
+            value <- sInteger ("call_" ++ show name)
             constrain $ ensureBounds value ffiRangeBounds .|| value .== literal ffiOutOfBoundsValue
             return $ M.insert name value m
         Nothing ->
@@ -180,39 +181,36 @@ initFFICalls MarloweFFI{unMarloweFFI} contract = do
 
 -- Create initial symbolic state, it takes an optional concrete State to serve
 -- as initial state, this way analysis can be done from a half-executed contract.
--- First parameter (pt) is the input parameter trace, which is just a fixed length
+-- First parameter (paramTrace) is the input parameter trace, which is just a fixed length
 -- list of symbolic integers that are matched to trace.
 -- When Nothing is passed as second parameter it acts like emptyState.
 mkInitialSymState :: MarloweFFI -> [(SInteger, SInteger, SInteger, SInteger)] -> Contract -> Maybe State
                   -> Symbolic SymState
-mkInitialSymState ffi pt contract Nothing = do
+mkInitialSymState ffi paramTrace contract Nothing = do
     (ls, hs) <- generateSymbolicInterval Nothing
     ffiCalls <- initFFICalls ffi contract
     return $ SymState { lowSlot = ls
                       , highSlot = hs
                       , traces = []
-                      , paramTrace = pt
+                      , paramTrace = paramTrace
                       , symInput = Nothing
                       , whenPos = 0
                       , symAccounts = mempty
                       , symChoices = mempty
                       , symBoundValues = mempty
                       , symFFICalls = ffiCalls }
-mkInitialSymState ffi pt contract (Just State { accounts = accs
-                                 , choices = cho
-                                 , boundValues = bVal
-                                 , minSlot = ms }) = do
-    (ls, hs) <- generateSymbolicInterval (Just (getSlot ms))
+mkInitialSymState ffi paramTrace contract (Just State{accounts, choices, boundValues, minSlot}) = do
+    (ls, hs) <- generateSymbolicInterval (Just (getSlot minSlot))
     ffiCalls <- initFFICalls ffi contract
     return $ SymState { lowSlot = ls
                       , highSlot = hs
                       , traces = []
-                      , paramTrace = pt
+                      , paramTrace = paramTrace
                       , symInput = Nothing
                       , whenPos = 0
-                      , symAccounts = toSymMap accs
-                      , symChoices = toSymMap cho
-                      , symBoundValues = toSymMap bVal
+                      , symAccounts = toSymMap accounts
+                      , symChoices = toSymMap choices
+                      , symBoundValues = toSymMap boundValues
                       , symFFICalls = ffiCalls }
 
 -- It converts a symbolic trace into a list of 4-uples of symbolic integers,
@@ -370,9 +368,7 @@ addTransaction newLowSlot newHighSlot newSymInput slotTim
 -- concrete boolean is False, otherwise it just passes the second
 -- symbolic parameter through
 onlyAssertionsPatch :: Bool -> SBool -> SBool -> SBool
-onlyAssertionsPatch b p1 p2
-  | b = p2
-  | otherwise = p1 .|| p2
+onlyAssertionsPatch b p1 p2 = if b then p2 else p1 .|| p2
 
 -- This is the main static analysis loop for contracts.
 -- - oa -- indicates whether we want to report only failing assertions (not any warning)
@@ -387,10 +383,10 @@ onlyAssertionsPatch b p1 p2
 isValidAndFailsAux :: Bool -> SBool -> Contract -> SymState
                    -> Symbolic SBool
 isValidAndFailsAux oa hasErr contract sState = case contract of
-    Close ->
-        return (hasErr .&& convertToSymbolicTrace ((lowSlot sState, highSlot sState,
-                                              symInput sState, whenPos sState)
-                                              :traces sState) (paramTrace sState))
+    Close -> return (hasErr .&& whatTheHellIsThis)
+      where
+        whatTheHellIsThis = convertToSymbolicTrace newTraces (paramTrace sState)
+        newTraces = (lowSlot sState, highSlot sState, symInput sState, whenPos sState) : traces sState
 
     Pay accId payee token val cont -> isValidAndFailsAux oa newHasError cont finalSState
       where
@@ -674,9 +670,9 @@ interpretResult ffi trace@((l, _, _, _):_) contract maybeState =
 -- and initial state (optional), and the list of variables used.
 extractCounterExample :: MarloweFFI -> SMTModel -> Contract -> Maybe State -> [(String, String, String, String)]
                       -> CounterExample
-extractCounterExample ffi smtModel cont maybeState maps = interpretedResult
+extractCounterExample ffi smtModel cont maybeState labels = interpretedResult
   where assocs = map (\(a, b) -> (a, fromCV b :: Integer)) $ modelAssocs smtModel
-        counterExample = groupResult maps (M.fromList assocs)
+        counterExample = groupResult labels (M.fromList assocs)
         interpretedResult = interpretResult ffi (reverse counterExample) cont maybeState
 
 -- Wrapper function that carries the static analysis and interprets the result.
@@ -690,6 +686,7 @@ warningsTraceCustom ffi onlyAssertions contract maybeState = do
     case result of
         Unsatisfiable _ _ -> return ValidContract
         Satisfiable _ smtModel -> do
+            traceM $ "smtModel " ++ show smtModel
             let counterExample = extractCounterExample ffi smtModel contract maybeState labels
             return $ CounterExample counterExample
         _ -> return $ AnalysisError (show thmRes)
