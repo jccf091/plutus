@@ -92,6 +92,7 @@ data AnalysisResult = ValidContract
                     | AnalysisError String
   deriving (Show)
 
+
 isContractValid :: AnalysisResult -> Bool
 isContractValid ValidContract = True
 isContractValid _             = False
@@ -109,10 +110,12 @@ generateSymbolicInterval (Just ms) =
      constrain (ls .>= literal ms)
      return i
 
+
 -- foldWithKey for Plutus' AssocMap
 foldAssocMapWithKey :: (a -> k -> b -> a) -> a -> AssocMap.Map k b -> a
 foldAssocMapWithKey f acc = foldl' decF acc . AssocMap.toList
   where decF a (k, v) = f a k v
+
 
 -- Convert Plutus' AssocMap into a Map with symbolic values, which are literals of
 -- the content of the original AssocMap
@@ -179,6 +182,7 @@ initFFICalls MarloweFFI{unMarloweFFI} contract = do
             -- a Call name that is not in MarloweFFI always evaluates to 0
             return $ M.insert name (literal 0) m
 
+
 -- Create initial symbolic state, it takes an optional concrete State to serve
 -- as initial state, this way analysis can be done from a half-executed contract.
 -- First parameter (paramTrace) is the input parameter trace, which is just a fixed length
@@ -213,6 +217,7 @@ mkInitialSymState ffi paramTrace contract (Just State{accounts, choices, boundVa
                       , symBoundValues = toSymMap boundValues
                       , symFFICalls = ffiCalls }
 
+
 -- It converts a symbolic trace into a list of 4-uples of symbolic integers,
 -- this is a minimalistic representation of the counter-example trace that aims
 -- to minimise the functionalities from SBV that we use (just integers) for efficiency.
@@ -244,6 +249,7 @@ convertToSymbolicTrace ((lowS, highS, inp, pos):t) ((a, b, c, d):t2) =
     getSymValFrom (Just SymNotify)              = 0
 convertToSymbolicTrace _ _ = error "Provided symbolic trace is not long enough"
 
+
 -- Symbolic version evalValue
 symEvalVal :: Value Observation -> SymState -> SInteger
 symEvalVal (AvailableMoney accId tok) symState =
@@ -273,6 +279,7 @@ symEvalVal (Cond cond v1 v2) symState = ite (symEvalObs cond symState)
 symEvalVal (Call name _) symState =
   M.findWithDefault (literal 0) name (symFFICalls symState)
 
+
 -- Symbolic version evalObservation
 symEvalObs :: Observation -> SymState -> SBool
 symEvalObs (AndObs obs1 obs2) symState = symEvalObs obs1 symState .&&
@@ -295,6 +302,7 @@ symEvalObs (ValueEQ lhs rhs) symState = symEvalVal lhs symState .==
 symEvalObs TrueObs _ = sTrue
 symEvalObs FalseObs _ = sFalse
 
+
 -- Update the symbolic state given a symbolic input (just the maps)
 updateSymInput :: Maybe SymInput -> SymState -> Symbolic SymState
 updateSymInput Nothing symState = return symState
@@ -307,6 +315,7 @@ updateSymInput (Just (SymDeposit accId _ tok val)) symState =
 updateSymInput (Just (SymChoice choId val)) symState =
   return (symState {symChoices = M.insert choId val (symChoices symState)})
 updateSymInput (Just SymNotify) symState = return symState
+
 
 -- Moves the current transaction to the list of transactions and creates a
 -- new one. It takes newLowSlot and newHighSlot as parameters because the
@@ -370,6 +379,7 @@ addTransaction newLowSlot newHighSlot newSymInput slotTim
 onlyAssertionsPatch :: Bool -> SBool -> SBool -> SBool
 onlyAssertionsPatch b p1 p2 = if b then p2 else p1 .|| p2
 
+
 -- This is the main static analysis loop for contracts.
 -- - oa -- indicates whether we want to report only failing assertions (not any warning)
 -- - hasErr -- indicates whether the current symbolic execution has already
@@ -431,11 +441,13 @@ isValidAndFailsAux oa hasErr contract sState = case contract of
     Assert obs cont -> isValidAndFailsAux oa (hasErr .|| sNot obsVal) cont sState
       where obsVal = symEvalObs obs sState
 
+
 -- Returns sTrue iif the given sinteger is in the list of bounds
 ensureBounds :: SInteger -> [Bound] -> SBool
 ensureBounds _ [] = sFalse
 ensureBounds symVal (Bound lowBnd hiBnd : t) =
     ((symVal .>= literal lowBnd) .&& (symVal .<= literal hiBnd)) .|| ensureBounds symVal t
+
 
 -- Just combines addTransaction and isValidAndFailsAux
 applyInputConditions :: Bool -> SInteger -> SInteger -> SBool -> Maybe SymInput -> Timeout
@@ -446,12 +458,14 @@ applyInputConditions oa ls hs hasErr maybeSymInput timeout sState pos cont =
      newTrace <- isValidAndFailsAux oa hasErr cont newSState
      return (newCond, newTrace)
 
+
 -- Generates two new slot numbers and puts them in the symbolic state
 addFreshSlotsToState :: SymState -> Symbolic (SInteger, SInteger, SymState)
 addFreshSlotsToState sState =
   do newLowSlot <- sInteger_
      newHighSlot <- sInteger_
      return (newLowSlot, newHighSlot, sState {lowSlot = newLowSlot, highSlot = newHighSlot})
+
 
 -- Analysis loop for When construct. Essentially, it iterates over all the cases and
 -- branches the static analysis. All parameters are the same as isValidAndFailsAux except
@@ -532,6 +546,7 @@ isValidAndFailsWhen oa hasErr (Case (Notify obs) cont:rest)
                                        hasErr (Just symInput) timeout sState pos cont
      return (ite (newCond .&& obsRes .&& sNot clashResult) newTrace contTrace)
 
+
 --------------------------------------------------
 -- Wrapper - SBV handling and result extraction --
 --------------------------------------------------
@@ -552,6 +567,7 @@ countWhens contract = case contract of
     countWhensCaseList (Case uu c : tail) = max (countWhens c) (countWhensCaseList tail)
     countWhensCaseList []                 = 0
 
+
 -- Main wrapper of the static analysis takes a Bool that indicates whether only
 -- assertions should be checked, a Contract, a paramTrace, and an optional
 -- State. paramTrace is actually an output parameter. We do not put it in the result of
@@ -563,6 +579,7 @@ contractIsGood :: Bool -> MarloweFFI -> Contract -> [(SInteger, SInteger, SInteg
 contractIsGood oa ffi contract st maybeState = do
     ess <- mkInitialSymState ffi st contract maybeState
     isValidAndFailsAux oa sFalse contract ess
+
 
 -- It generates a list of variable names for the variables that conform paramTrace.
 -- The list will account for the given number of transactions (four vars per transaction).
@@ -576,6 +593,7 @@ generateLabels n = foldMap genLabels [1..n]
                     action_label ++ "branch")]
       where action_label = "action_" ++ show n ++ "_"
 
+
 -- Takes a list of variable names for the paramTrace and generates the list of symbolic
 -- variables. It returns the list of symbolic variables generated (list of 4-uples).
 generateParameters :: [(String, String, String, String)] -> Symbolic [(SInteger, SInteger, SInteger, SInteger)]
@@ -585,6 +603,7 @@ generateParameters labels = forM labels $ \(sl, sh, v, b) -> do
     iv <- sInteger v
     ib <- sInteger b
     return (isl, ish, iv, ib)
+
 
 -- Takes the list of paramTrace variable names and the list of mappings of these
 -- names to concrete values, and reconstructs a concrete list of 4-uples of the ordered
@@ -599,6 +618,7 @@ groupResult ((sl, sh, v, b) : t) mappings =
         (Just ib) = M.lookup b mappings
 groupResult [] _ = []
 
+
 -- Reconstructs an input from a Case list a Case position and a value (deposit amount or
 -- chosen value)
 caseToInput :: [Case a] -> Integer -> Integer -> Input
@@ -610,6 +630,7 @@ caseToInput (Case h _:t) c v
                Choice choId _            -> IChoice choId v
                Notify _                  -> INotify
   | otherwise = error "Negative case number"
+
 
 -- Given an input, state, and contract, it runs the semantics on the transaction,
 -- and it adds the transaction and warnings issued to the result as long as the
@@ -629,6 +650,7 @@ computeAndContinue ffi transactionInput state contract t =
                       , txOutContract = newContract}
                           -> ([transactionInput], warnings)
                              :executeAndInterpret ffi newState t newContract
+
 
 -- Takes a list of 4-uples (and state and contract) and interprets it as a list of
 -- transactions and also computes the resulting list of warnings.
@@ -653,6 +675,7 @@ executeAndInterpret ffi state ((l, h, v, branch):t) cont
     env = Environment { slotInterval = mySlotInterval, marloweFFI = ffi }
     mkTransactionInput inputs = TransactionInput { txInterval = mySlotInterval, txInputs = inputs }
 
+
 -- It wraps executeAndInterpret so that it takes an optional State, and also
 -- combines the results of executeAndInterpret in one single tuple.
 interpretResult :: MarloweFFI -> [(Integer, Integer, Integer, Integer)] -> Contract -> Maybe State
@@ -660,13 +683,14 @@ interpretResult :: MarloweFFI -> [(Integer, Integer, Integer, Integer)] -> Contr
 interpretResult _ [] _ _ = error "Empty result"
 interpretResult ffi trace@((l, _, _, _):_) contract maybeState =
     MkCounterExample { ceInitialSlot = Slot l
-                     , ceTransactionInputs = tin
-                     , ceWarnings = twa
+                     , ceTransactionInputs = txInputs
+                     , ceWarnings = warnings
                      }
-   where (tin, twa) = fold $ executeAndInterpret ffi initialState trace contract
+   where (txInputs, warnings) = fold $ executeAndInterpret ffi initialState trace contract
          initialState = case maybeState of
                           Nothing -> emptyState (Slot l)
                           Just x  -> x
+
 
 -- It interprets the counter example found by SBV (SMTModel), given the contract,
 -- and initial state (optional), and the list of variables used.
@@ -676,6 +700,7 @@ extractCounterExample ffi smtModel cont maybeState labels = interpretedResult
   where assocs = map (\(a, b) -> (a, fromCV b :: Integer)) $ modelAssocs smtModel
         counterExample = groupResult labels (M.fromList assocs)
         interpretedResult = interpretResult ffi (reverse counterExample) cont maybeState
+
 
 -- Wrapper function that carries the static analysis and interprets the result.
 -- It generates variables, runs SBV, and it interprets the result in Marlowe terms.
@@ -700,17 +725,20 @@ warningsTraceCustom ffi onlyAssertions contract maybeState = do
         good <- contractIsGood onlyAssertions ffi contract params maybeState
         return (sNot good)
 
+
 -- Like warningsTraceCustom but checks all warnings (including assertions)
 warningsTraceWithState :: MarloweFFI -> Contract
               -> Maybe State
               -> IO AnalysisResult
 warningsTraceWithState ffi = warningsTraceCustom ffi False
 
+
 -- Like warningsTraceCustom but only checks assertions.
 onlyAssertionsWithState :: MarloweFFI -> Contract
               -> Maybe State
               -> IO AnalysisResult
 onlyAssertionsWithState ffi = warningsTraceCustom ffi True
+
 
 -- Like warningsTraceWithState but without initialState.
 warningsTrace :: MarloweFFI -> Contract
