@@ -312,7 +312,7 @@ mulAnalysisTest :: IO ()
 mulAnalysisTest = do
     let muliply = foldl (\a _ -> MulValue (UseValue $ ValueId "a") a) (Constant 1) [1..100]
         contract = If (muliply `ValueGE` Constant 10000) Close (Pay aliceAcc (Party alicePk) ada (Constant (-100)) Close)
-    result <- warningsTrace defaultMarloweFFI contract
+    result <- warningsTrace defaultMarloweFFIInfo contract
     --print result
     assertBool "Analysis ok" $ isContractValid result
 
@@ -323,7 +323,7 @@ ffiTest = do
     assertEqual "Should be out of bounds"  12 $ eval (emptyState (Slot 10)) Close (Call 0 [ArgInteger 50])
     let contract = When [Case (Deposit aliceAcc alicePk ada (Constant 41))
                          (Pay aliceAcc (Party "bob") ada (Call 0 []) Close)] 123 Close
-    res <- warningsTrace testFFI contract
+    res <- warningsTrace (marloweFFIInfoFromMarloweFFI testFFI) contract
     case res of
         ValidContract -> return ()
         r             -> assertFailure (show r)
@@ -383,7 +383,7 @@ stateSerialization = do
 
 analyseContract :: Contract -> IO AnalysisResult
 analyseContract contract = do
-    res <- catch (warningsTrace defaultMarloweFFI contract)
+    res <- catch (warningsTrace defaultMarloweFFIInfo contract)
         (\exc -> return $ AnalysisError (show (exc :: SomeException)))
     return res
 

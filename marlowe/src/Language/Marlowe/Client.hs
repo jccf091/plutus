@@ -284,6 +284,9 @@ mkMachineInstance ffi@(raw, _) params =
 defaultMarloweFFI :: MarloweFFI
 defaultMarloweFFI = MarloweFFI Map.empty
 
+defaultMarloweFFIInfo :: MarloweFFIInfo
+defaultMarloweFFIInfo = MarloweFFIInfo Map.empty
+
 
 defaultMarloweCompiledFFI :: CompiledFFI
 defaultMarloweCompiledFFI = (defaultMarloweFFI, $$(PlutusTx.compile [|| defaultMarloweFFI ||]))

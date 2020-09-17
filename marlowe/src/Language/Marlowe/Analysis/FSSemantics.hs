@@ -165,21 +165,21 @@ foldMapContractValue :: Monoid m => (Value Observation -> m) -> Contract -> m
 foldMapContractValue = foldMapContract (const mempty) (const mempty) (const mempty)
 
 
-initFFICalls :: MarloweFFI -> Contract -> Symbolic (Map Integer SInteger)
-initFFICalls MarloweFFI{unMarloweFFI} contract = do
+initFFICalls :: MarloweFFIInfo -> Contract -> Symbolic (Map Integer SInteger)
+initFFICalls MarloweFFIInfo{unMarloweFFIInfo} contract = do
     let calls = foldMapContractValue collectFFICalls contract
     foldM createSymbolicInputForFFICall mempty calls
   where
     collectFFICalls (Call name _) = S.singleton name
     collectFFICalls _             = mempty
 
-    createSymbolicInputForFFICall m name = case AssocMap.lookup name unMarloweFFI of
-        Just (_, FFInfo{ffiRangeBounds, ffiOutOfBoundsValue}) -> do
+    createSymbolicInputForFFICall m name = case AssocMap.lookup name unMarloweFFIInfo of
+        Just FFInfo{ffiRangeBounds, ffiOutOfBoundsValue} -> do
             value <- sInteger ("call_" ++ show name)
             constrain $ ensureBounds value ffiRangeBounds .|| value .== literal ffiOutOfBoundsValue
             return $ M.insert name value m
         Nothing ->
-            -- a Call name that is not in MarloweFFI always evaluates to 0
+            -- a Call name that is not in MarloweFFIInfo always evaluates to 0
             return $ M.insert name (literal 0) m
 
 
@@ -188,7 +188,7 @@ initFFICalls MarloweFFI{unMarloweFFI} contract = do
 -- First parameter (paramTrace) is the input parameter trace, which is just a fixed length
 -- list of symbolic integers that are matched to trace.
 -- When Nothing is passed as second parameter it acts like emptyState.
-mkInitialSymState :: MarloweFFI -> [(SInteger, SInteger, SInteger, SInteger)] -> Contract -> Maybe State
+mkInitialSymState :: MarloweFFIInfo -> [(SInteger, SInteger, SInteger, SInteger)] -> Contract -> Maybe State
                   -> Symbolic SymState
 mkInitialSymState ffi paramTrace contract Nothing = do
     (ls, hs) <- generateSymbolicInterval Nothing
@@ -574,7 +574,7 @@ countWhens contract = case contract of
 -- this function because then we would have to return a symbolic list that would make
 -- the whole process slower. It is meant to be used just with SBV, with a symbolic
 -- paramTrace, and we use the symbolic paramTrace to know which is the counterexample.
-contractIsGood :: Bool -> MarloweFFI -> Contract -> [(SInteger, SInteger, SInteger, SInteger)] -> Maybe State
+contractIsGood :: Bool -> MarloweFFIInfo -> Contract -> [(SInteger, SInteger, SInteger, SInteger)] -> Maybe State
         -> Symbolic SBool
 contractIsGood oa ffi contract st maybeState = do
     ess <- mkInitialSymState ffi st contract maybeState
@@ -639,31 +639,32 @@ caseToInput (Case h _:t) c v
 -- Input is passed as a combination and function from input list to transaction input and
 -- input list for convenience. The list of 4-tuples is passed through because it is used
 -- to recursively call executeAndInterpret (co-recursive funtion).
-computeAndContinue :: MarloweFFI -> TransactionInput -> State -> Contract
+computeAndContinue :: MarloweFFI -> MarloweFFIInfo -> TransactionInput -> State -> Contract
                    -> [(Integer, Integer, Integer, Integer)]
                    -> [([TransactionInput], [TransactionWarning])]
-computeAndContinue ffi transactionInput state contract trace =
+computeAndContinue ffi ffiInfo transactionInput state contract trace =
   case computeTransaction ffi transactionInput state contract of
-    Error TEUselessTransaction -> executeAndInterpret ffi state trace contract
+    Error TEUselessTransaction -> executeAndInterpret ffiInfo state trace contract
     TransactionOutput { txOutWarnings = warnings
                       , txOutState = newState
                       , txOutContract = newContract}
                           -> ([transactionInput], warnings)
-                             :executeAndInterpret ffi newState trace newContract
+                             :executeAndInterpret ffiInfo newState trace newContract
 
 
 -- Takes a list of 4-uples (and state and contract) and interprets it as a list of
 -- transactions and also computes the resulting list of warnings.
-executeAndInterpret :: MarloweFFI -> State -> [(Integer, Integer, Integer, Integer)] -> Contract
+executeAndInterpret :: MarloweFFIInfo -> State -> [(Integer, Integer, Integer, Integer)] -> Contract
                     -> [([TransactionInput], [TransactionWarning])]
 executeAndInterpret _ _ [] _ = []
-executeAndInterpret ffi state ((l, h, v, branch):trace) cont
-  | branch == 0 = computeAndContinue ffi (mkTransactionInput []) state cont trace
+executeAndInterpret ffiInfo state ((l, h, v, branch):trace) cont
+  | branch == 0 = computeAndContinue ffi ffiInfo (mkTransactionInput []) state cont trace
   | otherwise = case reduceContractUntilQuiescent env state cont of
         ContractQuiescent _ _ _ tempCont ->
             case tempCont of
                 When cases _ _ -> computeAndContinue
                                     ffi
+                                    ffiInfo
                                     (mkTransactionInput [caseToInput cases branch v])
                                     state
                                     cont
@@ -674,14 +675,24 @@ executeAndInterpret ffi state ((l, h, v, branch):trace) cont
     mySlotInterval = (Slot l, Slot h)
     env = Environment { slotInterval = mySlotInterval, marloweFFI = ffi }
     mkTransactionInput inputs = TransactionInput { txInterval = mySlotInterval, txInputs = inputs }
+    ffi = ffiFromFFIInfo ffiInfo mempty
+
+    ffiFromFFIInfo :: MarloweFFIInfo -> FFIValues -> MarloweFFI
+    ffiFromFFIInfo MarloweFFIInfo{unMarloweFFIInfo} callValues = MarloweFFI (AssocMap.fromList list)
+      where
+        list = fmap asdf $ AssocMap.toList unMarloweFFIInfo
+
+        asdf (name, ffinfo) = case M.lookup name callValues of
+            Just value -> (name, (\state contract args -> value, ffinfo))
+            Nothing -> error $ "Cannot find FFI call value for " <> show name
 
 
-type FFICallsValues = Map Integer Integer
+type FFIValues = Map Integer Integer
 
 
 -- It wraps executeAndInterpret so that it takes an optional State, and also
 -- combines the results of executeAndInterpret in one single tuple.
-interpretResult :: MarloweFFI -> [(Integer, Integer, Integer, Integer)] -> Contract -> Maybe State
+interpretResult :: MarloweFFIInfo -> [(Integer, Integer, Integer, Integer)] -> Contract -> Maybe State
                 -> CounterExample
 interpretResult _ [] _ _ = error "Empty result"
 interpretResult ffi trace@((l, _, _, _):_) contract maybeState =
@@ -697,7 +708,7 @@ interpretResult ffi trace@((l, _, _, _):_) contract maybeState =
 
 -- It interprets the counter example found by SBV (SMTModel), given the contract,
 -- and initial state (optional), and the list of variables used.
-extractCounterExample :: MarloweFFI -> SMTModel -> Contract -> Maybe State -> [(String, String, String, String)]
+extractCounterExample :: MarloweFFIInfo -> SMTModel -> Contract -> Maybe State -> [(String, String, String, String)]
                       -> CounterExample
 extractCounterExample ffi smtModel cont maybeState labels = interpretedResult
   where assocs = map (\(a, b) -> (a, fromCV b :: Integer)) $ modelAssocs smtModel
@@ -707,7 +718,7 @@ extractCounterExample ffi smtModel cont maybeState labels = interpretedResult
 
 -- Wrapper function that carries the static analysis and interprets the result.
 -- It generates variables, runs SBV, and it interprets the result in Marlowe terms.
-warningsTraceCustom :: MarloweFFI -> Bool
+warningsTraceCustom :: MarloweFFIInfo -> Bool
               -> Contract
               -> Maybe State
               -> IO AnalysisResult
@@ -730,20 +741,20 @@ warningsTraceCustom ffi onlyAssertions contract maybeState = do
 
 
 -- Like warningsTraceCustom but checks all warnings (including assertions)
-warningsTraceWithState :: MarloweFFI -> Contract
+warningsTraceWithState :: MarloweFFIInfo -> Contract
               -> Maybe State
               -> IO AnalysisResult
 warningsTraceWithState ffi = warningsTraceCustom ffi False
 
 
 -- Like warningsTraceCustom but only checks assertions.
-onlyAssertionsWithState :: MarloweFFI -> Contract
+onlyAssertionsWithState :: MarloweFFIInfo -> Contract
               -> Maybe State
               -> IO AnalysisResult
 onlyAssertionsWithState ffi = warningsTraceCustom ffi True
 
 
 -- Like warningsTraceWithState but without initialState.
-warningsTrace :: MarloweFFI -> Contract
+warningsTrace :: MarloweFFIInfo -> Contract
               -> IO AnalysisResult
 warningsTrace ffi con = warningsTraceWithState ffi con Nothing
