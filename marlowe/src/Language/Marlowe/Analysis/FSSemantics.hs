@@ -618,16 +618,16 @@ caseToInput (Case h _:t) c v
 -- Input is passed as a combination and function from input list to transaction input and
 -- input list for convenience. The list of 4-tuples is passed through because it is used
 -- to recursively call executeAndInterpret (co-recursive funtion).
-computeAndContinue :: MarloweFFI -> ([Input] -> TransactionInput) -> [Input] -> State -> Contract
+computeAndContinue :: MarloweFFI -> TransactionInput -> State -> Contract
                    -> [(Integer, Integer, Integer, Integer)]
                    -> [([TransactionInput], [TransactionWarning])]
-computeAndContinue ffi transaction inputs state contract t =
-  case computeTransaction ffi (transaction inputs) state contract of
+computeAndContinue ffi transactionInput state contract t =
+  case computeTransaction ffi transactionInput state contract of
     Error TEUselessTransaction -> executeAndInterpret ffi state t contract
     TransactionOutput { txOutWarnings = warnings
                       , txOutState = newState
                       , txOutContract = newContract}
-                          -> ([transaction inputs], warnings)
+                          -> ([transactionInput], warnings)
                              :executeAndInterpret ffi newState t newContract
 
 -- Takes a list of 4-uples (and state and contract) and interprets it as a list of
@@ -635,21 +635,23 @@ computeAndContinue ffi transaction inputs state contract t =
 executeAndInterpret :: MarloweFFI -> State -> [(Integer, Integer, Integer, Integer)] -> Contract
                     -> [([TransactionInput], [TransactionWarning])]
 executeAndInterpret _ _ [] _ = []
-executeAndInterpret ffi sta ((l, h, v, b):t) cont
-  | b == 0 = computeAndContinue ffi transaction [] sta cont t
-  | otherwise =
-       case reduceContractUntilQuiescent env sta cont of
-         ContractQuiescent _ _ _ tempCont ->
-           case tempCont of
-             When cases _ _ -> computeAndContinue ffi transaction
-                                  [caseToInput cases b v] sta cont t
-             _ -> error "Cannot interpret result"
-         _ -> error "Error reducing contract when interpreting result"
-  where mySlotInterval = (Slot l, Slot h)
-        env = Environment { slotInterval = mySlotInterval, marloweFFI = ffi }
-        transaction inputs = TransactionInput { txInterval = mySlotInterval
-                                              , txInputs = inputs
-                                              }
+executeAndInterpret ffi state ((l, h, v, branch):t) cont
+  | branch == 0 = computeAndContinue ffi (mkTransactionInput []) state cont t
+  | otherwise = case reduceContractUntilQuiescent env state cont of
+        ContractQuiescent _ _ _ tempCont ->
+            case tempCont of
+                When cases _ _ -> computeAndContinue
+                                    ffi
+                                    (mkTransactionInput [caseToInput cases branch v])
+                                    state
+                                    cont
+                                    t
+                _ -> error "Cannot interpret result"
+        _ -> error "Error reducing contract when interpreting result"
+  where
+    mySlotInterval = (Slot l, Slot h)
+    env = Environment { slotInterval = mySlotInterval, marloweFFI = ffi }
+    mkTransactionInput inputs = TransactionInput { txInterval = mySlotInterval, txInputs = inputs }
 
 -- It wraps executeAndInterpret so that it takes an optional State, and also
 -- combines the results of executeAndInterpret in one single tuple.
