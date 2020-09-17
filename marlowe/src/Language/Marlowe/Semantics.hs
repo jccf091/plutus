@@ -450,20 +450,23 @@ data FFArg  = ArgValueId (ValueId)
   deriving stock (Show,Generic,P.Eq,P.Ord)
   deriving anyclass (Pretty)
 
-
+type FFIFunction = State -> Contract -> [FFArg] -> Integer
 data FFInfo = FFInfo
     { ffiRangeBounds      :: [Bound]
     , ffiOutOfBoundsValue :: Integer
-    , ffiFunction         :: State -> Contract -> [FFArg] -> Integer
     }
 
 
-newtype MarloweFFI = MarloweFFI { unMarloweFFI :: Map Integer FFInfo }
+newtype MarloweFFI = MarloweFFI { unMarloweFFI :: Map Integer (FFIFunction, FFInfo) }
+newtype MarloweFFIInfo = MarloweFFIInfo { unMarloweFFIInfo :: Map Integer FFInfo }
+
+marloweFFIInfoFromMarloweFFI :: MarloweFFI -> MarloweFFIInfo
+marloweFFIInfoFromMarloweFFI MarloweFFI{unMarloweFFI} = MarloweFFIInfo $ fmap snd unMarloweFFI
 
 instance Show MarloweFFI where
     show MarloweFFI{unMarloweFFI} = "MarloweFFI { " P.<> funs P.<> " }"
       where
-        showFunInfo (name, FFInfo{ffiRangeBounds,ffiOutOfBoundsValue}) =
+        showFunInfo (name, (_, FFInfo{ffiRangeBounds,ffiOutOfBoundsValue})) =
             show name P.<> " ∈ " P.<> show ffiRangeBounds P.<> " or " P.<> show ffiOutOfBoundsValue
         funs = intercalate ", " (P.map showFunInfo (Map.toList unMarloweFFI))
 
@@ -537,7 +540,7 @@ evalValue env state contract value =
         Cond cond thn els    -> if evalObservation env state contract cond then eval thn else eval els
         Call funName args    ->
             case Map.lookup funName (unMarloweFFI (marloweFFI env)) of
-                Just FFInfo{ffiFunction, ffiRangeBounds, ffiOutOfBoundsValue} -> let
+                Just (ffiFunction, FFInfo{ffiRangeBounds, ffiOutOfBoundsValue}) -> let
                     result = ffiFunction state contract args
                     in if result `inBounds` ffiRangeBounds then result else ffiOutOfBoundsValue
                 Nothing -> 0

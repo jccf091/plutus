@@ -1,3 +1,4 @@
+{-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell     #-}
 module App where
@@ -10,11 +11,12 @@ import           Data.ByteString.Lazy.UTF8             as BSU
 import           Data.Maybe                            (fromMaybe)
 import           Language.Marlowe                      (Contract, Slot (Slot), State, TransactionInput,
                                                         TransactionWarning)
-import           Language.Marlowe.Analysis.FSSemantics (warningsTraceCustom)
+import           Language.Marlowe.Analysis.FSSemantics (AnalysisResult(..), CounterExample(..), warningsTraceCustom)
+import           Language.Marlowe.Client (defaultMarloweFFI)
 import           Language.Marlowe.Pretty
 import           Marlowe.Symbolic.Types.Request        (Request (Request, callbackUrl, contract, onlyAssertions, state))
 import qualified Marlowe.Symbolic.Types.Request        as Req
-import           Marlowe.Symbolic.Types.Response       (Response (Response, result), Result (CounterExample, Error, Valid, initialSlot, transactionList, transactionWarning))
+import           Marlowe.Symbolic.Types.Response       (Response (Response, result), Result (Error, Valid, initialSlot, transactionList, transactionWarning))
 import qualified Marlowe.Symbolic.Types.Response       as Res
 import           System.Process                        (system)
 import           Text.PrettyPrint.Leijen               (displayS, renderCompact)
@@ -23,21 +25,19 @@ prettyToString :: Pretty a => a -> String
 prettyToString x = (displayS $ renderCompact $ prettyFragment x) ""
 
 makeResponse :: String ->
-                Either String (Maybe (Slot, [TransactionInput], [TransactionWarning]))
+                Either String AnalysisResult
              -> Response
-makeResponse u (Left err) = Response {Res.uuid = u, result = Error (show err)}
-makeResponse u (Right res) =
-   Response
-     { Res.uuid = u
-     , result = case res of
-                  Nothing -> Valid
-                  Just (Slot sn, ti, tw) ->
-                     CounterExample
+makeResponse u result = case result of
+    Left err -> Response { Res.uuid = u, result = Error err }
+    Right (AnalysisError err) -> Response { Res.uuid = u, result = Error (show err) }
+    Right (CounterExample MkCounterExample{ceInitialSlot=(Slot sn), ceTransactions, ceWarnings}) ->
+        Response { Res.uuid = u, result = Res.CounterExample
                        { initialSlot = sn
-                       , transactionList = prettyToString ti
-                       , transactionWarning = prettyToString tw
-                       }
-     }
+                       , transactionList = prettyToString ceTransactions
+                       , transactionWarning = prettyToString ceWarnings
+                       } }
+    Right ValidContract -> Response { Res.uuid = u, result = Valid }
+
 
 handler :: Request -> Context () -> IO (Either Response Response)
 handler Request {Req.uuid = u, onlyAssertions = oa, contract = c, state = st} _ =
@@ -51,8 +51,9 @@ handler Request {Req.uuid = u, onlyAssertions = oa, contract = c, state = st} _ 
      case mContract of
         Nothing -> return $ Left (makeResponse u (Left "Can't parse JSON as a contract"))
         Just contract -> do
-            evRes <- warningsTraceCustom onlyAssertions contract state
-            let resp = makeResponse u (first show evRes)
+            -- FIXME pass MarloweFFIInfo here instead of defaultMarloweFFI
+            evRes <- warningsTraceCustom defaultMarloweFFI onlyAssertions contract state
+            let resp = makeResponse u (Right evRes)
             _ <- system "killallz3"
             putStrLn $ BSU.toString $ encode resp
             pure $ Right resp

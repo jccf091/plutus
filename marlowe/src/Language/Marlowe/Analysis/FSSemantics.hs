@@ -171,11 +171,13 @@ initFFICalls MarloweFFI{unMarloweFFI} contract = do
     asdf _             = mempty
 
     fff m name = case AssocMap.lookup name unMarloweFFI of
-        Just FFInfo{ffiRangeBounds, ffiOutOfBoundsValue} -> do
+        Just (_, FFInfo{ffiRangeBounds, ffiOutOfBoundsValue}) -> do
             value <- sInteger_
             constrain $ ensureBounds value ffiRangeBounds .|| value .== literal ffiOutOfBoundsValue
             return $ M.insert name value m
-        Nothing -> return $ M.insert name (literal 0) m
+        Nothing ->
+            -- a Call name that is not in MarloweFFI always evaluates to 0
+            return $ M.insert name (literal 0) m
 
 -- Create initial symbolic state, it takes an optional concrete State to serve
 -- as initial state, this way analysis can be done from a half-executed contract.
@@ -390,6 +392,7 @@ isValidAndFailsAux oa hasErr contract sState = case contract of
         return (hasErr .&& convertToSymbolicTrace ((lowSlot sState, highSlot sState,
                                               symInput sState, whenPos sState)
                                               :traces sState) (paramTrace sState))
+
     Pay accId payee token val cont -> isValidAndFailsAux oa newHasError cont finalSState
       where
         concVal = symEvalVal val sState
@@ -435,9 +438,9 @@ isValidAndFailsAux oa hasErr contract sState = case contract of
 
 -- Returns sTrue iif the given sinteger is in the list of bounds
 ensureBounds :: SInteger -> [Bound] -> SBool
-ensureBounds cho [] = sFalse
-ensureBounds cho (Bound lowBnd hiBnd:t) =
-    ((cho .>= literal lowBnd) .&& (cho .<= literal hiBnd)) .|| ensureBounds cho t
+ensureBounds _ [] = sFalse
+ensureBounds symVal (Bound lowBnd hiBnd : t) =
+    ((symVal .>= literal lowBnd) .&& (symVal .<= literal hiBnd)) .|| ensureBounds symVal t
 
 -- Just combines addTransaction and isValidAndFailsAux
 applyInputConditions :: Bool -> SInteger -> SInteger -> SBool -> Maybe SymInput -> Timeout
@@ -550,9 +553,9 @@ countWhens contract = case contract of
     Let va vb c       -> countWhens c
     Assert o c        -> countWhens c
   where
-countWhensCaseList :: [Case Contract] -> Integer
-countWhensCaseList (Case uu c : tail) = max (countWhens c) (countWhensCaseList tail)
-countWhensCaseList []                 = 0
+    countWhensCaseList :: [Case Contract] -> Integer
+    countWhensCaseList (Case uu c : tail) = max (countWhens c) (countWhensCaseList tail)
+    countWhensCaseList []                 = 0
 
 -- Main wrapper of the static analysis takes a Bool that indicates whether only
 -- assertions should be checked, a Contract, a paramTrace, and an optional

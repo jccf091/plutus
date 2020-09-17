@@ -328,7 +328,7 @@ ffiTest = do
 {-# INLINABLE testFFI #-}
 testFFI :: MarloweFFI
 testFFI = MarloweFFI (AssocMap.fromList
-    [ (0, FFInfo { ffiFunction = identity, ffiRangeBounds = [Bound 42 42], ffiOutOfBoundsValue = 12 })
+    [ (0, (identity, FFInfo {ffiRangeBounds = [Bound 42 42], ffiOutOfBoundsValue = 12 }))
     ])
 
 
