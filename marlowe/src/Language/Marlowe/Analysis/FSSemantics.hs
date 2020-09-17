@@ -642,14 +642,14 @@ caseToInput (Case h _:t) c v
 computeAndContinue :: MarloweFFI -> TransactionInput -> State -> Contract
                    -> [(Integer, Integer, Integer, Integer)]
                    -> [([TransactionInput], [TransactionWarning])]
-computeAndContinue ffi transactionInput state contract t =
+computeAndContinue ffi transactionInput state contract trace =
   case computeTransaction ffi transactionInput state contract of
-    Error TEUselessTransaction -> executeAndInterpret ffi state t contract
+    Error TEUselessTransaction -> executeAndInterpret ffi state trace contract
     TransactionOutput { txOutWarnings = warnings
                       , txOutState = newState
                       , txOutContract = newContract}
                           -> ([transactionInput], warnings)
-                             :executeAndInterpret ffi newState t newContract
+                             :executeAndInterpret ffi newState trace newContract
 
 
 -- Takes a list of 4-uples (and state and contract) and interprets it as a list of
@@ -657,8 +657,8 @@ computeAndContinue ffi transactionInput state contract t =
 executeAndInterpret :: MarloweFFI -> State -> [(Integer, Integer, Integer, Integer)] -> Contract
                     -> [([TransactionInput], [TransactionWarning])]
 executeAndInterpret _ _ [] _ = []
-executeAndInterpret ffi state ((l, h, v, branch):t) cont
-  | branch == 0 = computeAndContinue ffi (mkTransactionInput []) state cont t
+executeAndInterpret ffi state ((l, h, v, branch):trace) cont
+  | branch == 0 = computeAndContinue ffi (mkTransactionInput []) state cont trace
   | otherwise = case reduceContractUntilQuiescent env state cont of
         ContractQuiescent _ _ _ tempCont ->
             case tempCont of
@@ -667,13 +667,16 @@ executeAndInterpret ffi state ((l, h, v, branch):t) cont
                                     (mkTransactionInput [caseToInput cases branch v])
                                     state
                                     cont
-                                    t
+                                    trace
                 _ -> error "Cannot interpret result"
         _ -> error "Error reducing contract when interpreting result"
   where
     mySlotInterval = (Slot l, Slot h)
     env = Environment { slotInterval = mySlotInterval, marloweFFI = ffi }
     mkTransactionInput inputs = TransactionInput { txInterval = mySlotInterval, txInputs = inputs }
+
+
+type FFICallsValues = Map Integer Integer
 
 
 -- It wraps executeAndInterpret so that it takes an optional State, and also
