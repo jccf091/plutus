@@ -6,26 +6,17 @@
 module Language.Marlowe.Analysis.FSSemantics where
 
 import           Control.Monad
-import           Data.Aeson                 (FromJSON, ToJSON)
 import           Data.Foldable              (fold)
-import           Data.List                  (foldl', genericIndex)
+import           Data.List                  (foldl')
 import           Data.Map.Strict            (Map)
 import qualified Data.Map.Strict            as M
-import           Data.Maybe                 (isNothing)
-import           Data.Monoid
 import           Data.SBV
-import qualified Data.SBV.Either            as SE
 import           Data.SBV.Internals         (SMTModel (..))
-import qualified Data.SBV.List              as SL
-import qualified Data.SBV.Maybe             as SM
-import qualified Data.SBV.Tuple             as ST
 import qualified Data.Set                   as S
-import           GHC.Generics               (Generic)
 import           Language.Marlowe.Semantics
 import qualified Language.PlutusTx.AssocMap as AssocMap
 import qualified Language.PlutusTx.Ratio    as P
 import           Ledger                     (Slot (..))
-import Debug.Trace
 
 ---------------------------------------------------
 -- Static analysis logic and symbolic operations --
@@ -84,6 +75,7 @@ data CounterExample = MkCounterExample
     { ceInitialSlot       :: Slot
     , ceTransactionInputs :: [TransactionInput]
     , ceWarnings          :: [TransactionWarning]
+    , ceFFIValues         :: FFIValues
     }
   deriving (Show)
 
@@ -583,10 +575,10 @@ contractIsGood oa ffi contract st maybeState = do
 
 -- It generates a list of variable names for the variables that conform paramTrace.
 -- The list will account for the given number of transactions (four vars per transaction).
-generateLabels :: Integer -> [(String, String, String, String)]
+generateLabels :: Integer -> [Labels]
 generateLabels n = foldMap genLabels [1..n]
   where
-    genLabels :: Integer -> [(String, String, String, String)]
+    genLabels :: Integer -> [Labels]
     genLabels n = [(action_label ++ "minSlot",
                     action_label ++ "maxSlot",
                     action_label ++ "value",
@@ -596,7 +588,7 @@ generateLabels n = foldMap genLabels [1..n]
 
 -- Takes a list of variable names for the paramTrace and generates the list of symbolic
 -- variables. It returns the list of symbolic variables generated (list of 4-uples).
-generateParameters :: [(String, String, String, String)] -> Symbolic [(SInteger, SInteger, SInteger, SInteger)]
+generateParameters :: [Labels] -> Symbolic [(SInteger, SInteger, SInteger, SInteger)]
 generateParameters labels = forM labels $ \(sl, sh, v, b) -> do
     isl <- sInteger sl
     ish <- sInteger sh
@@ -608,15 +600,15 @@ generateParameters labels = forM labels $ \(sl, sh, v, b) -> do
 -- Takes the list of paramTrace variable names and the list of mappings of these
 -- names to concrete values, and reconstructs a concrete list of 4-uples of the ordered
 -- concrete values.
-groupResult :: [(String, String, String, String)] -> Map String Integer -> [(Integer, Integer, Integer, Integer)]
-groupResult ((sl, sh, v, b) : t) mappings =
+makeTraceInputs :: [Labels] -> Map String Integer -> [TraceInput]
+makeTraceInputs ((sl, sh, v, b) : t) mappings =
     if ib == -1 then []
-    else (isl, ish, iv, ib) : groupResult t mappings
+    else (isl, ish, iv, ib) : makeTraceInputs t mappings
   where (Just isl) = M.lookup sl mappings
         (Just ish) = M.lookup sh mappings
         (Just iv) = M.lookup v mappings
         (Just ib) = M.lookup b mappings
-groupResult [] _ = []
+makeTraceInputs [] _ = []
 
 
 -- Reconstructs an input from a Case list a Case position and a value (deposit amount or
@@ -639,32 +631,31 @@ caseToInput (Case h _:t) c v
 -- Input is passed as a combination and function from input list to transaction input and
 -- input list for convenience. The list of 4-tuples is passed through because it is used
 -- to recursively call executeAndInterpret (co-recursive funtion).
-computeAndContinue :: MarloweFFI -> MarloweFFIInfo -> TransactionInput -> State -> Contract
-                   -> [(Integer, Integer, Integer, Integer)]
+computeAndContinue :: MarloweFFI -> TransactionInput -> State -> Contract
+                   -> [TraceInput]
                    -> [([TransactionInput], [TransactionWarning])]
-computeAndContinue ffi ffiInfo transactionInput state contract trace =
+computeAndContinue ffi transactionInput state contract trace =
   case computeTransaction ffi transactionInput state contract of
-    Error TEUselessTransaction -> executeAndInterpret ffiInfo state trace contract
+    Error TEUselessTransaction -> executeAndInterpret ffi state trace contract
     TransactionOutput { txOutWarnings = warnings
                       , txOutState = newState
                       , txOutContract = newContract}
                           -> ([transactionInput], warnings)
-                             :executeAndInterpret ffiInfo newState trace newContract
+                             :executeAndInterpret ffi newState trace newContract
 
 
 -- Takes a list of 4-uples (and state and contract) and interprets it as a list of
 -- transactions and also computes the resulting list of warnings.
-executeAndInterpret :: MarloweFFIInfo -> State -> [(Integer, Integer, Integer, Integer)] -> Contract
+executeAndInterpret :: MarloweFFI -> State -> [TraceInput] -> Contract
                     -> [([TransactionInput], [TransactionWarning])]
 executeAndInterpret _ _ [] _ = []
-executeAndInterpret ffiInfo state ((l, h, v, branch):trace) cont
-  | branch == 0 = computeAndContinue ffi ffiInfo (mkTransactionInput []) state cont trace
+executeAndInterpret ffi state ((l, h, v, branch):trace) cont
+  | branch == 0 = computeAndContinue ffi (mkTransactionInput []) state cont trace
   | otherwise = case reduceContractUntilQuiescent env state cont of
         ContractQuiescent _ _ _ tempCont ->
             case tempCont of
                 When cases _ _ -> computeAndContinue
                                     ffi
-                                    ffiInfo
                                     (mkTransactionInput [caseToInput cases branch v])
                                     state
                                     cont
@@ -675,45 +666,56 @@ executeAndInterpret ffiInfo state ((l, h, v, branch):trace) cont
     mySlotInterval = (Slot l, Slot h)
     env = Environment { slotInterval = mySlotInterval, marloweFFI = ffi }
     mkTransactionInput inputs = TransactionInput { txInterval = mySlotInterval, txInputs = inputs }
-    ffi = ffiFromFFIInfo ffiInfo mempty
-
-    ffiFromFFIInfo :: MarloweFFIInfo -> FFIValues -> MarloweFFI
-    ffiFromFFIInfo MarloweFFIInfo{unMarloweFFIInfo} callValues = MarloweFFI (AssocMap.fromList list)
-      where
-        list = fmap asdf $ AssocMap.toList unMarloweFFIInfo
-
-        asdf (name, ffinfo) = case M.lookup name callValues of
-            Just value -> (name, (\state contract args -> value, ffinfo))
-            Nothing -> error $ "Cannot find FFI call value for " <> show name
-
-
-type FFIValues = Map Integer Integer
 
 
 -- It wraps executeAndInterpret so that it takes an optional State, and also
 -- combines the results of executeAndInterpret in one single tuple.
-interpretResult :: MarloweFFIInfo -> [(Integer, Integer, Integer, Integer)] -> Contract -> Maybe State
+interpretResult :: MarloweFFIInfo -> FFIValues -> [TraceInput] -> Contract -> Maybe State
                 -> CounterExample
-interpretResult _ [] _ _ = error "Empty result"
-interpretResult ffi trace@((l, _, _, _):_) contract maybeState =
+interpretResult _ _ [] _ _ = error "Empty result"
+interpretResult ffiInfo ffiValues trace@((l, _, _, _):_) contract maybeState =
     MkCounterExample { ceInitialSlot = Slot l
                      , ceTransactionInputs = txInputs
                      , ceWarnings = warnings
+                     , ceFFIValues = ffiValues
                      }
-   where (txInputs, warnings) = fold $ executeAndInterpret ffi initialState trace contract
-         initialState = case maybeState of
-                          Nothing -> emptyState (Slot l)
-                          Just x  -> x
+  where
+    (txInputs, warnings) = fold $ executeAndInterpret ffi initialState trace contract
 
+    initialState = case maybeState of
+        Nothing -> emptyState (Slot l)
+        Just x  -> x
+
+    ffi = ffiFromFFIInfo ffiInfo ffiValues
+
+    ffiFromFFIInfo :: MarloweFFIInfo -> FFIValues -> MarloweFFI
+    ffiFromFFIInfo MarloweFFIInfo{unMarloweFFIInfo} ffiValues = MarloweFFI (AssocMap.fromList list)
+      where
+        list = fmap convertFFIInfoToMarloweFFI $ AssocMap.toList unMarloweFFIInfo
+
+        convertFFIInfoToMarloweFFI (name, ffinfo) = case M.lookup name ffiValues of
+            Just value -> (name, (\state contract args -> value, ffinfo))
+            Nothing    -> error $ "Cannot find FFI call value for " <> show name
+
+
+type Labels = (String, String, String, String)
+type TraceInput = (Integer, Integer, Integer, Integer)
+type FFIValues = Map Integer Integer
 
 -- It interprets the counter example found by SBV (SMTModel), given the contract,
 -- and initial state (optional), and the list of variables used.
-extractCounterExample :: MarloweFFIInfo -> SMTModel -> Contract -> Maybe State -> [(String, String, String, String)]
+extractCounterExample :: MarloweFFIInfo -> SMTModel -> Contract -> Maybe State -> [Labels]
                       -> CounterExample
-extractCounterExample ffi smtModel cont maybeState labels = interpretedResult
-  where assocs = map (\(a, b) -> (a, fromCV b :: Integer)) $ modelAssocs smtModel
-        counterExample = groupResult labels (M.fromList assocs)
-        interpretedResult = interpretResult ffi (reverse counterExample) cont maybeState
+extractCounterExample ffi@MarloweFFIInfo{unMarloweFFIInfo} smtModel cont maybeState labels = counterExample
+  where paramValues = M.fromList (map (\(a, b) -> (a, fromCV b :: Integer)) $ modelAssocs smtModel)
+        traceInputs = reverse $ makeTraceInputs labels paramValues
+        ffiValues = foldMap collectFFIValues $ AssocMap.toList unMarloweFFIInfo
+          where
+            collectFFIValues (name, _) =
+                case M.lookup ("call_" <> show name) paramValues of
+                    Just value -> M.singleton name value
+                    Nothing    -> error $ "Unknown FFI call name: " <> show name
+        counterExample = interpretResult ffi ffiValues traceInputs cont maybeState
 
 
 -- Wrapper function that carries the static analysis and interprets the result.
@@ -727,7 +729,6 @@ warningsTraceCustom ffi onlyAssertions contract maybeState = do
     case result of
         Unsatisfiable _ _ -> return ValidContract
         Satisfiable _ smtModel -> do
-            traceM $ "smtModel " ++ show smtModel
             let counterExample = extractCounterExample ffi smtModel contract maybeState labels
             return $ CounterExample counterExample
         _ -> return $ AnalysisError (show thmRes)

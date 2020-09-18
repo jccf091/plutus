@@ -27,6 +27,7 @@ import           System.IO.Unsafe                      (unsafePerformIO)
 import           Data.Aeson                            (decode, encode)
 import qualified Data.ByteString                       as BS
 import           Data.Either                           (isRight)
+import qualified Data.Map.Strict                       as Map
 import           Data.Ratio                            ((%))
 import qualified Data.Set                              as S
 import           Data.String
@@ -325,8 +326,8 @@ ffiTest = do
                          (Pay aliceAcc (Party "bob") ada (Call 0 []) Close)] 123 Close
     res <- warningsTrace (marloweFFIInfoFromMarloweFFI testFFI) contract
     case res of
-        ValidContract -> return ()
-        r             -> assertFailure (show r)
+        CounterExample MkCounterExample{ceFFIValues} -> assertEqual "" 42 (ceFFIValues Map.! 0)
+        _                                            -> assertFailure "Must find counterexample"
   where
     eval = evalValue (Environment { slotInterval = (Slot 10, Slot 1000), marloweFFI = testFFI })
 
@@ -393,7 +394,7 @@ closeIsValidTest = do
     result <- analyseContract Close
     case result of
         ValidContract -> return ()
-        err -> assertFailure (show err)
+        err           -> assertFailure (show err)
 
 
 payNegativeGivesWarningTest :: IO ()
