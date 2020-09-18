@@ -1,3 +1,5 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE NamedFieldPuns #-}
 {-# LANGUAGE TypeApplications #-}
@@ -80,60 +82,95 @@ data ContinueWhen
     = ThisSlot -- ^ Yield control (cooperative multitasking), resuming computation in the same slot
     | NextSlot (Maybe Slot) -- ^ Sleep until the given slot
 
-data EmThreadId =
+data EmThreadId a =
     EmContractInstance ContractInstanceId
-    | EmUser Wallet
-    | EMGlobalThread
+    | EmUser (Agent a)
+    | EmGlobalThread
 
-data EmThread effs =
+data EmThread a effs =
     EmThread
-        { emThreadID :: EmThreadId
-        , emContinuation :: Slot -> Eff effs (Status effs ContinueWhen Slot ())
+        { emContinuation :: Slot -> Eff effs (Status effs (EmThreadId a, ContinueWhen) Slot ())
         }
 
-data SchedulerState effs =
+data SchedulerState a effs =
     SchedulerState
-        { currentSlotActions :: [EmThread effs]
-        , futureActions :: [EmThread effs]
+        { currentSlotActions :: [EmThread a effs]
+        , futureActions :: [EmThread a effs]
         , currentSlot :: Slot
         }
 
-initialState :: SchedulerState effs
+initialState :: SchedulerState a effs
 initialState = SchedulerState [] [] 0
+
+enqueueThisSlot :: EmThread a effs -> SchedulerState a effs -> SchedulerState a effs
+enqueueThisSlot thread s =
+    s{currentSlotActions = currentSlotActions s ++ [thread]}
+
+data SimulatorInterpreter a effs =
+    SimulatorInterpreter
+        { interpRunLocal :: forall b. Agent a -> LocalAction a b -> Eff (Yield (EmThreadId a, ContinueWhen) Slot ': effs) b
+        , interpRunGlobal :: forall b. GlobalAction a b -> Eff (Yield (EmThreadId a, ContinueWhen) Slot ': effs) b
+        }
 
 -- | Evaluate the 'Simulator' actions, populating the 'SchedulerState' with
 --   threads.
-initialiseScheduler :: forall effs.
-    Eff '[Simulator Emulator] ()
-    -> SchedulerState effs
-initialiseScheduler =
-    run
-    . execState initialState
-    . interpret handleEmulator
-    . raiseEnd @'[State (SchedulerState effs)] @(Simulator Emulator)
+initialiseScheduler :: forall a effs.
+    SimulatorInterpreter a effs
+    -> Eff '[Simulator a]
+    ~> Eff (Yield (EmThreadId a, ContinueWhen) Slot ': effs)
+initialiseScheduler i = interpret (handleEmulator i) . raiseEnd
 
-handleEmulator :: 
-    Simulator Emulator
-    ~> Eff '[State (SchedulerState effs)]
-handleEmulator = \case
-    RunLocal wllt localAction -> undefined
-    RunGlobal globalAction -> undefined
+handleEmulator :: forall a effs.
+    SimulatorInterpreter a effs
+    -> Simulator a
+    ~> Eff (Yield (EmThreadId a, ContinueWhen) Slot ': effs)
+handleEmulator SimulatorInterpreter{interpRunGlobal, interpRunLocal} = \case
+    RunLocal wllt localAction -> do
+        -- be nice and go to the back of the queue
+        _ <- yield @(EmThreadId a, ContinueWhen) @Slot (EmUser wllt, ThisSlot) id
+        interpRunLocal wllt localAction
+    RunGlobal globalAction -> do
+        _ <- yield @(EmThreadId a, ContinueWhen) @Slot (EmGlobalThread, ThisSlot) id
+        interpRunGlobal globalAction
+
+runScheduler :: forall a effs.
+    (Slot -> Eff effs ())
+    -> Eff (Yield (EmThreadId a, ContinueWhen) Slot ': effs)
+    ~> Eff effs
+runScheduler onNextSlot e = runC e >>= loop initialState where
+
+    loop :: forall x. SchedulerState a effs -> Status effs (EmThreadId a, ContinueWhen) Slot x -> Eff effs x
+    loop state = \case
+        Done a ->
+            -- advance the clock, etc.
+            pure a
+        Continue (threadid, waitUntil) k -> do
+            case waitUntil of
+                    ThisSlot -> do
+                        result' <- k (currentSlot state)
+                        let state' = enqueueThisSlot EmThread{emContinuation = k } state
+                        loop state' _
+            undefined
 
 -- | Run the threads round-robin style, advancing the clock whenever there is
 --   nothing left to do in the current slot.
-runScheduler :: forall effs. SchedulerState effs -> Eff effs ()
-runScheduler s@SchedulerState{currentSlotActions, futureActions, currentSlot} = do
-    case currentSlotActions of
-        t@EmThread{emContinuation}:xs -> do
-            x' <- emContinuation currentSlot
-            let newState = case x' of
-                    Done () -> s{currentSlotActions = xs, futureActions = futureActions}
-                    Continue ThisSlot r -> s{currentSlotActions = xs ++ [t{emContinuation=r}], futureActions = futureActions}
-                    Continue (NextSlot _) r -> s{currentSlotActions = xs, futureActions = futureActions ++ [t{emContinuation=r}]}
-            runScheduler newState
-        [] -> do
-             -- current slot is finished
-             let newSlot = currentSlot + 1
-             -- TODO: tell the node to do its thing and make a block
-             runScheduler $ SchedulerState{currentSlotActions=futureActions, futureActions=[], currentSlot=newSlot}
+-- runScheduler :: forall a effs.
+--     (Slot -> Eff effs ()) -- ^ What to do when a new slot starts
+--     -> SchedulerState a effs -- ^ The scheduler
+--     -> Eff effs ()
+-- runScheduler onNextSlot s@SchedulerState{currentSlotActions, futureActions, currentSlot} = do
+--     case currentSlotActions of
+--         t@EmThread{emContinuation}:xs -> do
+--             x' <- emContinuation currentSlot
+--             let newState = case x' of
+--                     Done () -> s{currentSlotActions = xs, futureActions = futureActions}
+--                     Continue ThisSlot r -> s{currentSlotActions = xs ++ [t{emContinuation=r}], futureActions = futureActions}
+--                     Continue (NextSlot _) r -> s{currentSlotActions = xs, futureActions = futureActions ++ [t{emContinuation=r}]}
+--             runScheduler onNextSlot  newState
+--         [] -> do
+--              -- current slot is finished
+--              let newSlot = currentSlot + 1
+--                  newState = SchedulerState{currentSlotActions=futureActions, futureActions=[], currentSlot=newSlot}
+--              onNextSlot newSlot
+--              runScheduler onNextSlot newState
 
