@@ -12,7 +12,7 @@ import           Data.Maybe                            (fromMaybe)
 import           Language.Marlowe                      (Contract, Slot (Slot), State, TransactionInput,
                                                         TransactionWarning)
 import           Language.Marlowe.Analysis.FSSemantics (AnalysisResult (..), CounterExample (..), warningsTraceCustom)
-import           Language.Marlowe.Client               (defaultMarloweFFI)
+import           Language.Marlowe.Client               (defaultMarloweFFIInfo)
 import           Language.Marlowe.Pretty
 import           Marlowe.Symbolic.Types.Request        (Request (Request, callbackUrl, contract, onlyAssertions, state))
 import qualified Marlowe.Symbolic.Types.Request        as Req
@@ -52,7 +52,7 @@ handler Request {Req.uuid = u, onlyAssertions = oa, contract = c, state = st} _ 
         Nothing -> return $ Left (makeResponse u (Left "Can't parse JSON as a contract"))
         Just contract -> do
             -- FIXME pass MarloweFFIInfo here instead of defaultMarloweFFI
-            evRes <- warningsTraceCustom defaultMarloweFFI onlyAssertions contract state
+            evRes <- warningsTraceCustom defaultMarloweFFIInfo onlyAssertions contract state
             let resp = makeResponse u (Right evRes)
             _ <- system "killallz3"
             putStrLn $ BSU.toString $ encode resp
