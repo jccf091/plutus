@@ -57,33 +57,35 @@ tests :: TestTree
 tests = testGroup "Marlowe"
     [ testGroup "Cases"
         [ testCase "Contracts with different creators have different hashes" uniqueContractHash
-    -- , testCase "Token Show instance respects HEX and Unicode" tokenShowTest
-    -- , testCase "Pangram Contract serializes into valid JSON" pangramContractSerialization
-    -- , testCase "State serializes into valid JSON" stateSerialization
-    -- , testCase "Validator size is reasonable" validatorSize
-    -- , testCase "Mul analysis" mulAnalysisTest
+        , testCase "Token Show instance respects HEX and Unicode" tokenShowTest
+        , testCase "Pangram Contract serializes into valid JSON" pangramContractSerialization
+        , testCase "State serializes into valid JSON" stateSerialization
+        , testCase "Validator size is reasonable" validatorSize
+        , testCase "Mul analysis" mulAnalysisTest
         ]
-    , testGroup "Properties" []
-    -- , testProperty "Value equality is reflexive, symmetric, and transitive" checkEqValue
-    -- , testProperty "Value double negation" doubleNegation
-    -- , testProperty "Values form abelian group" valuesFormAbelianGroup
-    -- , testProperty "Values can be serialized to JSON" valueSerialization
-    -- , testProperty "Scale Value multiplies by a constant rational" scaleMulTest
-    -- , testProperty "Multiply by zero" mulTest
-    -- , testProperty "Scale rounding" scaleRoundingTest
-    , testGroup "Contracts" []
-    -- , zeroCouponBondTest
-    -- , trustFundTest
+    , testGroup "Properties"
+        [ testProperty "Value equality is reflexive, symmetric, and transitive" checkEqValue
+        , testProperty "Value double negation" doubleNegation
+        , testProperty "Values form abelian group" valuesFormAbelianGroup
+        , testProperty "Values can be serialized to JSON" valueSerialization
+        , testProperty "Scale Value multiplies by a constant rational" scaleMulTest
+        , testProperty "Multiply by zero" mulTest
+        , testProperty "Scale rounding" scaleRoundingTest
+        ]
+    , testGroup "Contracts"
+        [ zeroCouponBondTest
+        , trustFundTest
+        ]
     , testGroup "Static Analysis"
         [ testCase "Close is valid" closeIsValidTest
         , testCase "FFI Test" ffiTest
         , testCase "Negative payment issues a warning" payNegativeGivesWarningTest
-        -- , testProperty "No false positives" Spec.Marlowe.Marlowe.prop_noFalsePositives
---        , testProperty "Same as old implementation" Spec.Marlowe.Marlowe.runManuallySameAsOldImplementation
+        , testProperty "No false positives" prop_noFalsePositives
+        , testProperty "Same as old implementation" runManuallySameAsOldImplementation
         ]
-    -- , testGroup "Marlowe JSON"
-    --     [ testProperty "Serialise deserialise loops" prop_jsonLoops
-    --     ]
+    , testGroup "Marlowe JSON"
+        [ testProperty "Serialise deserialise loops" prop_jsonLoops
+        ]
     ]
 
 
@@ -211,7 +213,7 @@ validatorSize :: IO ()
 validatorSize = do
     let validator = validatorScript $ defaultScriptInstance defaultMarloweParams
     let vsize = BS.length $ Write.toStrictByteString (Serialise.encode validator)
-    assertBool ("Validator is too large " <> show vsize) (vsize < 1400000)
+    assertBool ("Validator is too large " <> show vsize) (vsize < 1500000)
 
 
 checkEqValue :: Property
@@ -314,7 +316,7 @@ mulAnalysisTest = do
     let muliply = foldl (\a _ -> MulValue (UseValue $ ValueId "a") a) (Constant 1) [1..100]
         contract = If (muliply `ValueGE` Constant 10000) Close (Pay aliceAcc (Party alicePk) ada (Constant (-100)) Close)
     result <- warningsTrace defaultMarloweFFIInfo contract
-    --print result
+    print result
     assertBool "Analysis ok" $ isContractValid result
 
 
