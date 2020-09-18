@@ -61,7 +61,6 @@ tests = testGroup "Marlowe"
         , testCase "Pangram Contract serializes into valid JSON" pangramContractSerialization
         , testCase "State serializes into valid JSON" stateSerialization
         , testCase "Validator size is reasonable" validatorSize
-        , testCase "Mul analysis" mulAnalysisTest
         ]
     , testGroup "Properties"
         [ testProperty "Value equality is reflexive, symmetric, and transitive" checkEqValue
@@ -78,10 +77,10 @@ tests = testGroup "Marlowe"
         ]
     , testGroup "Static Analysis"
         [ testCase "Close is valid" closeIsValidTest
+        , testCase "Mul analysis" mulAnalysisTest
         , testCase "FFI Test" ffiTest
         , testCase "Negative payment issues a warning" payNegativeGivesWarningTest
         , testProperty "No false positives" prop_noFalsePositives
-        , testProperty "Same as old implementation" runManuallySameAsOldImplementation
         ]
     , testGroup "Marlowe JSON"
         [ testProperty "Serialise deserialise loops" prop_jsonLoops
@@ -313,10 +312,11 @@ valueSerialization = property $
 
 mulAnalysisTest :: IO ()
 mulAnalysisTest = do
-    let muliply = foldl (\a _ -> MulValue (UseValue $ ValueId "a") a) (Constant 1) [1..100]
-        contract = If (muliply `ValueGE` Constant 10000) Close (Pay aliceAcc (Party alicePk) ada (Constant (-100)) Close)
+    let muliply = MulValue (Constant 500) (Constant 500)
+        contract = If (muliply `ValueGE` Constant 10000)
+                    Close
+                    (Pay aliceAcc (Party alicePk) ada (Constant (-100)) Close)
     result <- warningsTrace defaultMarloweFFIInfo contract
-    print result
     assertBool "Analysis ok" $ isContractValid result
 
 
@@ -484,4 +484,3 @@ jsonLoops cont = decode (encode cont) === Just cont
 
 prop_jsonLoops :: Property
 prop_jsonLoops = withMaxSuccess 1000 $ forAllShrink contractGen shrinkContract jsonLoops
-
