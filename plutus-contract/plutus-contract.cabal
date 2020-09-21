@@ -88,8 +88,10 @@ library
         Wallet.Types
         Control.Monad.Freer.Extras
         Control.Monad.Freer.Log
-        Plutus.Trace2
         Plutus.Trace
+        Plutus.Trace.Playground
+        Plutus.Trace.Emulator
+        Plutus.Trace.Types
     hs-source-dirs: src
     build-depends:
         plutus-ledger -any,
