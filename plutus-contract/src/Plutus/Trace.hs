@@ -89,7 +89,7 @@ data EmThreadId a =
 
 data EmThread a effs =
     EmThread
-        { emContinuation :: Slot -> Eff effs (Status effs (EmThreadId a, ContinueWhen) Slot ())
+        { emContinuation :: Slot -> Eff effs (Status effs (ContinueWhen) Slot ())
         }
 
 data SchedulerState a effs =
@@ -119,8 +119,16 @@ data SimulatorInterpreter a effs =
         , interpRunGlobal :: forall b. GlobalAction a b -> Eff effs (b, EmThread a effs)
         }
 
+newtype GlobalThreadId = GlobalThreadId Int
+newtype ContractThreadId = ContractThreadId ContractThreadId
+
+type YieldGobal effs = Yield (Eff effs ()) GlobalThreadId
+type YieldContract effs = Yield (Eff effs ()) ContractThreadId
+
+data SimulatorThread =
+    
 type SchedulerEffs a effs =
-    ( Yield (EmThreadId a, ContinueWhen) Slot
+    ( Yield (ContinueWhen) Slot
     ': State (SchedulerState a effs)
     ': effs
     )
@@ -141,12 +149,12 @@ handleEmulator SimulatorInterpreter{interpRunGlobal, interpRunLocal} = \case
     RunLocal wllt localAction -> do
         (b, thread) <- raise $ raise $ interpRunLocal wllt localAction
         modify @(SchedulerState a effs) (enqueueThisSlot thread)
-        _ <- yield @(EmThreadId a, ContinueWhen) @Slot (EmUser wllt, ThisSlot) id
+        _ <- yield @(ContinueWhen) @Slot (ThisSlot) id
         pure b
     RunGlobal globalAction -> do
         (b, thread) <- raise $ raise $ interpRunGlobal globalAction
         modify @(SchedulerState a effs) (enqueueThisSlot thread)
-        _ <- yield @(EmThreadId a, ContinueWhen) @Slot (EmGlobalThread, ThisSlot) id
+        _ <- yield @(ContinueWhen) @Slot (ThisSlot) id
         pure b
 
 data NextThread a effs =
@@ -155,29 +163,29 @@ data NextThread a effs =
     | NoMoreThreads
 
 handleResult ::
-    (EmThreadId a, ContinueWhen)
-    -> (Slot -> Eff effs (Status effs (EmThreadId a, ContinueWhen) Slot ()))
+    ContinueWhen
+    -> EmThread a effs
     -> Eff (State (SchedulerState a effs) ': effs) ()
-handleResult (_, waitUntil) k =
+handleResult waitUntil t =
     case waitUntil of
-        ThisSlot -> modify (enqueueThisSlot EmThread{emContinuation = k})
-        NextSlot _ -> modify (enqueueNextSlot EmThread{emContinuation = k})
+        ThisSlot -> modify (enqueueThisSlot t)
+        NextSlot _ -> modify (enqueueNextSlot t)
 
 nextThread :: Eff (State (SchedulerState a effs) ': effs) (NextThread a effs)
 nextThread = undefined
 
 runScheduler :: forall a effs.
     (Slot -> Eff effs Slot)
-    -> Eff (Yield (EmThreadId a, ContinueWhen) Slot ': effs) ()
+    -> Eff (Yield (ContinueWhen) Slot ': effs) ()
     -> Eff effs ()
 runScheduler onNextSlot e = runC e >>= (evalState initialState . loop)   where
 
-    loop :: Status effs (EmThreadId a, ContinueWhen) Slot () -> Eff (State (SchedulerState a effs) ': effs) ()
+    loop :: Status effs (ContinueWhen) Slot () -> Eff (State (SchedulerState a effs) ': effs) ()
     loop status = do
         SchedulerState{currentSlot} <- get @(SchedulerState a effs)
         _ <- case status of
                 Done () -> pure ()
-                Continue (threadid, waitUntil) k -> handleResult (threadid, waitUntil) k
+                Continue waitUntil k -> handleResult waitUntil (EmThread k)
         nt <- nextThread
         case nt of
             (ThreadInCurrentSlot (EmThread k)) ->
