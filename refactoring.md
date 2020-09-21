@@ -1,109 +1,126 @@
+# Contact trace refactoring
+
+## Requirements
+
+### What the trace type is used for
+
+* plutus-use-cases: Run contracts in emulator, call endpoints in a type-safe fashion
+* plutus-playground: Run 1 contract in the playground, serialisable traces
+* plutus-scb: Run contracts in SCB
+
+### What is annoying about the current implementation
+
+* 2 full-blown emulators, one in plutus-scb and one in plutus-contract
+* Having to call "handleBlockchainEvents" and "addBlock" - this is related to how time progresses in the emulator
+* A lot of polling in handleBlockchainEvents and elsewhere
+
+### What would be nice to have
+
+* Run traces in interactive mode (using (mock) node, wallet, etc.)
+* Extract UML sequence diagrams from trace (Plant UML)
+
+## Implementation Plan
+
+### Different kinds of traces
+
+To address the fact that we have three somewhat-different trace versions use the following type, mixing "trees that grow" with freer effects:
 
 ```haskell
--- Playground:
+class SimulatorBackend a where
+  type LocalAction a :: * -> *
+  type GlobalAction a :: * -> *
+  type Agent a
 
-type SimulatorAction = ContractCall (Fix FormArgumentF)
-
-type Expression = ContractCall JSON.Value
-
-data Simulation =
-    Simulation
-        { simulationName    :: String
-        , simulationActions :: [SimulatorAction]
-        , simulationWallets :: [SimulatorWallet]
-        }
-    deriving (Show, Generic, Eq)
-    deriving anyclass (ToJSON, FromJSON)
+data Simulator a b where
+    RunLocal :: SimulatorBackend a => Agent a -> LocalAction a b -> Simulator a b
+    RunGlobal :: SimulatorBackend a => GlobalAction a b -> Simulator a b
 ```
 
-# Qs
-
-- Playground agents are wallets, not contract instances?
-- Assertions?
-- Await / events
-  * Peng Li, Steve Zdancewic: "A Language-based Approach to Unifying Events and Threads"
-  * What are we waiting for
-    - A given slot
-    - An address to be modified
-  * Threads = Contract instances, blockchain, UI
-- Traces, extracting a visual representation of a simulation
-  - using the Observations effect?
-  ```plantuml
-  @startuml
-  Alice -> Bob : message 1
-  Alice -> Bob : message 2
-
-  newpage
-
-  Alice -> Bob : message 3
-  Alice -> Bob : message 4
-
-  newpage A title for the\nlast page
-
-  Alice -> Bob : message 5
-  Alice -> Bob : message 6
-  @enduml
-  ```
-- Clock ticks
-- No more handleBlockchainEvents?
-  * 3 queues: this slot, next slot, specific slot?
-  * Skip contract notifications
-- Global ops for simulator:
-  - Advance clock (?) OR: Wait until slot
-  - Suspend contract updates
-  - Resume contract updates
-  - User input / call endpoint
-- Scheduler
-  - In simulator: Advance clock to given slot
-  - In real-time mode / scb: Wait until the slot has been reached
-- Calling endpoint = Wait for endpoint to become available (just like "Await slot")
-  - Would be nice to get a state transition diagram about which endpoints can be called in which order
-  - Selective functor
-- Hedgehog generator for simulations
-
-# Approach
+Then we can instantiate this with different types depending on the trace. For example:
 
 ```haskell
-
-class SimulatorEnvironment a where
-  type ContractInstanceIdentifier a
-  type ContractIdentifier a
-  type Agent a
-  type Contract a
-  type Assertion a
-  type ContractEndpointIdentifier a :: Contract a -> *
-
--- | An action that runs in a global context.
-data GlobalAction a r where
-  WaitForSlot :: Slot -> GlobalAction a ()
-  LocalAction :: Agent a -> LocalAction a r -> GlobalAction a r
-  CheckAssertion :: Assertion a -> GlobalAction a ()
-
--- | An action that runs in the context of one of the simulated agents.
-data LocalAction a r where
-  CallEndpoint :: ContractInstanceIdentifier a -> String -> JSON.Value -> LocalAction a ()
-  Activate :: ContractIdentifier a -> GlobalAction a (ContractInstanceIdentifier a)
-  Install :: Contract a -> GlobalAction a (ContractIdentifier a)
-
 data Playground
 
-instance SimulatorEnvironment Playground where
-  type ContractInstanceIdentifier Playground = ()
-  type Agent Playground = Wallet
-  type ContractEndpointIdentifier Playground = forall a. String
+data PlaygroundLocal r where
+   CallEndpoint :: String -> JSON.Value -> PlaygroundLocal ()
+   PayToWallet :: Wallet -> Value -> PlaygroundLocal ()
 
-  type ContractIdentifier Playground = Void -- We can't activate contracts in the playground
-  type Contract Playground = Void -- We can't install contracts in the playground
-  type Assertion Playground = Void -- We can't make assertions in the playground
+data PlaygroundGlobal r where
+   WaitForSlot :: Slot -> PlaygroundGlobal ()
 
-instance ToJSON (GlobalAction Playground) where
-  ...
+instance SimulatorBackend Playground where
+    type LocalAction Playground = PlaygroundLocal
+    type GlobalAction Playground = PlaygroundGlobal
+    type Agent Playground = Wallet
 
-instance FromJSON (GlobalAction Playground) where
-
-data Emulator
-
-instance 
-
+-- | Playground traces need to be serialisable, so they are just
+--   lists of single 'PlaygroundAction's.
+type PlaygroundAction = Simulator Playground ()
+type PlaygroundTrace = [PlaygroundAction]
 ```
 
+and
+
+```haskell
+data Emulator
+-- | A reference to an installed contract in the emulator.
+data ContractHandle s e =
+    ContractHandle
+        { chContract   :: Contract s e ()
+        , chInstanceId :: ContractInstanceId
+        }
+
+data EmulatorLocal r where
+    ActivateContract :: Contract s e () -> EmulatorLocal (ContractHandle s e)
+
+    -- calling endpoints with correctly typed arguments, using the schema
+    CallEndpointEm :: forall l ep s e. HasEndpoint l ep s => Proxy l -> ContractHandle s e -> ep -> EmulatorLocal ()
+    PayToWallet :: Wallet -> Value -> EmulatorLocal ()
+
+data EmulatorGlobal r where
+    WaitUntilSlot :: Slot -> EmulatorGlobal ()
+
+instance SimulatorBackend Emulator where
+    type LocalAction Emulator = EmulatorLocal
+    type GlobalAction Emulator = EmulatorGlobal
+    type Agent Emulator = Wallet
+
+type EmulatorTrace a = Eff '[Simulator Emulator] a
+```
+
+### Dealing with time & polling
+
+To address the issues re. time: Use a scheduling approach to avoid polling. Based on _Peng Li, Steve Zdancewic_: "A Language-based Approach to Unifying Events and Threads"
+
+```haskell
+-- | The "system calls" we can make when interpreting a 'Simulator' action.
+data SimulatorSystemCall a effs =
+    Fork (SuspendedThread a effs)  -- ^ Start a new thread, and continue with the current thread in the current slot.
+    | YieldThisSlot -- ^ Yield control to other threads in the current slot.
+    | YieldNextSlot -- ^ Yield control to other threads, resuming only when a new slot has begun.
+
+newtype EmThread a effs = EmThread { emContinuation ::  Eff effs (Status effs (SimulatorSystemCall a effs) () ()) }
+{- NB The 'Status' type is from 'Control.Monad.Freer.Coroutine' -}
+
+data ContinueWhen
+    = ThisSlot -- ^ Yield control, resuming computation in the same slot
+    | NextSlot (Maybe Slot) -- ^ Sleep until the given slot
+    deriving stock (Eq, Ord, Show)
+
+data SuspendedThread a effs =
+    SuspendedThread
+        { stWhen   :: ContinueWhen
+        , stThread :: EmThread a effs
+        }
+
+data SimulatorInterpreter a effs =
+    SimulatorInterpreter
+        { interpRunLocal     :: forall b. Agent a -> LocalAction a b -> Eff effs (b, SuspendedThread a effs)
+        , interpRunGlobal    :: forall b. GlobalAction a b -> Eff effs (b, SuspendedThread a effs)
+        , interpOnSlotChange :: SlotChangeHandler effs -- ^ Called when we are done with all actions in the current slot.
+        }
+
+newtype SlotChangeHandler effs = SlotChangeHandler { runSlotChangeHandler :: Eff effs () }
+```
+
+This handles the old "non-interactive" mode of running traces and also supports "interactive mode" as an extension (where we use the real system time in `interpOnSlotChange`). It also gets rid of `handleBlockchainEvents` and of the need to do polling since we can use the `ContinueWhen` type to indicate when a thread should be woken up again.

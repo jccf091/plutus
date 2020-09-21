@@ -1,24 +1,28 @@
+{-# LANGUAGE GADTs        #-}
 {-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE GADTs #-}
 
 module Plutus.Trace.Playground(
     Playground
+    , PlaygroundLocal(..)
+    , PlaygroundGlobal(..)
     , ptrace
     ) where
 
-import Ledger.Slot (Slot)
-import qualified Data.Aeson as JSON
-import Wallet.Emulator.Wallet (Wallet(..))
+import qualified Data.Aeson             as JSON
+import           Ledger.Slot            (Slot)
+import           Ledger.Value           (Value)
+import           Wallet.Emulator.Wallet (Wallet (..))
 
-import Plutus.Trace.Types
+import           Plutus.Trace.Types
 
 data Playground
 
 data PlaygroundLocal r where
    CallEndpoint :: String -> JSON.Value -> PlaygroundLocal ()
+   PayToWallet :: Wallet -> Value -> PlaygroundLocal ()
 
 data PlaygroundGlobal r where
-   WaitForSlot :: Slot -> PlaygroundGlobal ()  
+   WaitForSlot :: Slot -> PlaygroundGlobal ()
 
 instance SimulatorBackend Playground where
     type LocalAction Playground = PlaygroundLocal
@@ -31,7 +35,7 @@ type PlaygroundAction = Simulator Playground ()
 type PlaygroundTrace = [PlaygroundAction]
 
 ptrace :: PlaygroundTrace
-ptrace = 
+ptrace =
     [ RunLocal (Wallet 1) $ CallEndpoint "submit" (JSON.toJSON "100 Ada")
     , RunGlobal $ WaitForSlot 10
     ]

@@ -1,10 +1,10 @@
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE TypeFamilies #-}
-{-# LANGUAGE GADTs #-}
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE GADTs               #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
 
 module Plutus.Trace.Emulator(
     Emulator
@@ -16,23 +16,23 @@ module Plutus.Trace.Emulator(
     , etrace
     ) where
 
-import Ledger.Slot (Slot)
-import Control.Monad.Freer
-import Wallet.Emulator.Wallet (Wallet(..))
-import Wallet.Types (ContractInstanceId)
-import Ledger.Value (Value)
-import Data.Void (Void)
-import Data.Proxy (Proxy(..))
-import Language.Plutus.Contract (Contract, HasEndpoint, BlockchainActions, type (.\/), Endpoint)
+import           Control.Monad.Freer
+import           Data.Proxy               (Proxy (..))
+import           Data.Void                (Void)
+import           Language.Plutus.Contract (type (.\/), BlockchainActions, Contract, Endpoint, HasEndpoint)
+import           Ledger.Slot              (Slot)
+import           Ledger.Value             (Value)
+import           Wallet.Emulator.Wallet   (Wallet (..))
+import           Wallet.Types             (ContractInstanceId)
 
-import Plutus.Trace.Types
+import           Plutus.Trace.Types
 
 data Emulator
 
 -- | A reference to an installed contract in the emulator.
 data ContractHandle s e =
     ContractHandle
-        { chContract :: Contract s e ()
+        { chContract   :: Contract s e ()
         , chInstanceId :: ContractInstanceId
         }
 

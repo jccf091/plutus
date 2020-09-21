@@ -1,15 +1,15 @@
-{-# LANGUAGE DerivingStrategies #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE RankNTypes #-}
-{-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE NamedFieldPuns #-}
-{-# LANGUAGE TypeApplications #-}
-{-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE DataKinds #-}
-{-# LANGUAGE GADTs #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE DataKinds           #-}
+{-# LANGUAGE DerivingStrategies  #-}
+{-# LANGUAGE FlexibleContexts    #-}
+{-# LANGUAGE GADTs               #-}
+{-# LANGUAGE LambdaCase          #-}
+{-# LANGUAGE NamedFieldPuns      #-}
+{-# LANGUAGE RankNTypes          #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications    #-}
+{-# LANGUAGE TypeFamilies        #-}
+{-# LANGUAGE TypeOperators       #-}
 
 module Plutus.Trace.Types(
     SimulatorBackend(..)
@@ -19,7 +19,6 @@ module Plutus.Trace.Types(
     , SuspendedThread(..)
     , SlotChangeHandler(..)
     , EmThread(..)
-    , EmThreadId(..)
     , ContinueWhen(..)
     , handleEmulator
     , runSimulator
@@ -28,14 +27,13 @@ module Plutus.Trace.Types(
     , suspendFuture
     ) where
 
-import Ledger.Slot (Slot)
-import Control.Monad.Freer
-import Control.Monad.Freer.Extras
-import Data.Sequence (Seq)
-import qualified Data.Sequence as Seq
-import Control.Monad (unless)
-import Wallet.Types (ContractInstanceId)
-import Control.Monad.Freer.Coroutine
+import           Control.Monad                 (unless)
+import           Control.Monad.Freer
+import           Control.Monad.Freer.Coroutine
+import           Control.Monad.Freer.Extras
+import           Data.Sequence                 (Seq)
+import qualified Data.Sequence                 as Seq
+import           Ledger.Slot                   (Slot)
 
 class SimulatorBackend a where
   type LocalAction a :: * -> *
@@ -51,50 +49,51 @@ data ContinueWhen
     | NextSlot (Maybe Slot) -- ^ Sleep until the given slot
     deriving stock (Eq, Ord, Show)
 
-data EmThreadId a =
-    EmContractInstance ContractInstanceId
-    | EmUser (Agent a)
-    | EmGlobalThread
-
-newtype EmThread a effs = EmThread { emContinuation ::  Eff effs (Status effs (SuspendedThread a effs) () ()) }
+newtype EmThread a effs = EmThread { emContinuation ::  Eff effs (Status effs (SimulatorSystemCall a effs) () ()) }
 
 data SuspendedThread a effs =
     SuspendedThread
-        { stWhen :: ContinueWhen
+        { stWhen   :: ContinueWhen
         , stThread :: EmThread a effs
         }
+
+-- | The "system calls" we can make when interpreting a 'Simulator' action.
+data SimulatorSystemCall a effs =
+    Fork (SuspendedThread a effs)  -- ^ Start a new thread, and continue with the current thread in the current slot.
+    | YieldThisSlot -- ^ Yield control to other threads in the current slot.
+    | YieldNextSlot -- ^ Yield control to other threads, resuming only when a new slot has begun.
 
 newtype SlotChangeHandler effs = SlotChangeHandler { runSlotChangeHandler :: Eff effs () }
 
 data SimulatorInterpreter a effs =
     SimulatorInterpreter
-        { interpRunLocal :: forall b. Agent a -> LocalAction a b -> Eff effs (b, SuspendedThread a effs)
-        , interpRunGlobal :: forall b. GlobalAction a b -> Eff effs (b, SuspendedThread a effs)
+        { interpRunLocal     :: forall b. Agent a -> LocalAction a b -> Eff effs (b, SuspendedThread a effs)
+        , interpRunGlobal    :: forall b. GlobalAction a b -> Eff effs (b, SuspendedThread a effs)
         , interpOnSlotChange :: SlotChangeHandler effs -- ^ Called when we are done with all actions in the current slot.
         }
 
 handleEmulator :: forall a effs.
     SimulatorInterpreter a effs
     -> Simulator a
-    ~> Eff (Yield (SuspendedThread a effs) () ': effs)
+    ~> Eff (Yield (SimulatorSystemCall a effs) () ': effs)
 handleEmulator SimulatorInterpreter{interpRunGlobal, interpRunLocal} = \case
     RunLocal wllt localAction -> do
         (b, thread) <- raise $ interpRunLocal wllt localAction
-        _ <- yield @(SuspendedThread a effs) @() thread id
+        _ <- yield @(SimulatorSystemCall a effs) @() (Fork thread) id
         pure b
     RunGlobal globalAction -> do
         (b, thread) <- raise $ interpRunGlobal globalAction
-        _ <- yield @(SuspendedThread a effs) @() thread id
+        _ <- yield @(SimulatorSystemCall a effs) @() (Fork thread) id
         pure b
 
-suspendNow :: Eff effs (Status effs (SuspendedThread a effs) () ()) -> SuspendedThread a effs
+suspendNow :: Eff effs (Status effs (SimulatorSystemCall a effs) () ()) -> SuspendedThread a effs
 suspendNow action =
     SuspendedThread
         { stWhen = ThisSlot
         , stThread = EmThread action
         }
 
-suspendFuture :: Eff effs (Status effs (SuspendedThread a effs) () ()) -> SuspendedThread a effs
+suspendFuture :: Eff effs (Status effs (SimulatorSystemCall a effs) () ()) -> SuspendedThread a effs
 suspendFuture action =
     SuspendedThread
         { stWhen = NextSlot Nothing
@@ -112,12 +111,14 @@ runSimulator i =
 
 runThreads :: forall a effs.
     SlotChangeHandler effs
-    -> Eff (Yield (SuspendedThread a effs) () ': effs) ()
+    -> Eff (Yield (SimulatorSystemCall a effs) () ': effs) ()
     -> Eff effs ()
-runThreads handler e = 
+runThreads handler e =
     loop handler $ enqueue (suspendNow $ runC e) initialState
 
--- | Run the threads that are scheduled in a 'SchedulerState' to completion
+-- | Run the threads that are scheduled in a 'SchedulerState' to completion,
+--   calling the 'SlotChangeHandler' whenever there is nothing left to do in
+--   the current slot.
 loop :: SlotChangeHandler effs -> SchedulerState a effs -> Eff effs ()
 loop handler s = do
     case dequeue s of
@@ -127,10 +128,10 @@ loop handler s = do
             case result of
                 Done _ -> loop handler newState
                 Continue thread k -> do
-                    let newState' =
-                            enqueue thread
-                            $ enqueue (suspendNow $ k ())
-                            $ newState
+                    let newState' = case thread of
+                            Fork thread'  -> enqueue thread' $ enqueue (suspendNow $ k ()) $ newState
+                            YieldThisSlot -> enqueue (suspendNow $ k ()) newState
+                            YieldNextSlot -> enqueue (suspendFuture $ k ()) newState
                     loop handler newState'
         NoMoreThreads -> pure ()
 
@@ -140,7 +141,7 @@ loop handler s = do
 data SchedulerState a effs =
     SchedulerState
         { currentSlotActions :: Seq (EmThread a effs)
-        , futureActions :: Seq (EmThread a effs)
+        , futureActions      :: Seq (EmThread a effs)
         }
 
 initialState :: SchedulerState a effs
@@ -149,9 +150,11 @@ initialState = SchedulerState Seq.empty Seq.empty
 enqueue :: SuspendedThread a effs -> SchedulerState a effs -> SchedulerState a effs
 enqueue SuspendedThread{stWhen, stThread} s =
     case stWhen of
-        ThisSlot -> s{currentSlotActions = currentSlotActions s Seq.|> stThread }
+        ThisSlot   -> s{currentSlotActions = currentSlotActions s Seq.|> stThread }
         NextSlot _ -> s{futureActions=futureActions s Seq.|> stThread}
 
+-- | Result of calling 'dequeue'. Either a thread that is ready now or in the next slot,
+--   or empty.
 data SchedulerDQResult a effs =
     AThread ContinueWhen (EmThread a effs) (SchedulerState a effs)
     | NoMoreThreads
