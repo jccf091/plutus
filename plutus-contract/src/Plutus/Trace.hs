@@ -87,9 +87,12 @@ data EmThreadId a =
     | EmUser (Agent a)
     | EmGlobalThread
 
-data EmThread a effs =
-    EmThread
-        { emContinuation :: Slot -> Eff effs (Status effs (ContinueWhen) Slot ())
+newtype EmThread a effs = EmThread { emContinuation :: Eff (Simulator a ': effs) () }
+
+data SuspendedThread a effs =
+    SuspendedThread
+        { stWhen :: ContinueWhen
+        , stThread :: EmThread a effs
         }
 
 data SchedulerState a effs =
@@ -125,21 +128,7 @@ newtype ContractThreadId = ContractThreadId ContractThreadId
 type YieldGobal effs = Yield (Eff effs ()) GlobalThreadId
 type YieldContract effs = Yield (Eff effs ()) ContractThreadId
 
-data SimulatorThread =
-    
-type SchedulerEffs a effs =
-    ( Yield (ContinueWhen) Slot
-    ': State (SchedulerState a effs)
-    ': effs
-    )
-
--- | Evaluate the 'Simulator' actions, populating the 'SchedulerState' with
---   threads.
-initialiseScheduler :: forall a effs.
-    SimulatorInterpreter a effs
-    -> Eff '[Simulator a]
-    ~> Eff (SchedulerEffs a effs)
-initialiseScheduler i = interpret (handleEmulator i) . raiseEnd
+type SchedulerEffs a effs = Yield (SuspendedThread a effs) () ': effs
 
 handleEmulator :: forall a effs.
     SimulatorInterpreter a effs
@@ -147,74 +136,28 @@ handleEmulator :: forall a effs.
     ~> Eff (SchedulerEffs a effs)
 handleEmulator SimulatorInterpreter{interpRunGlobal, interpRunLocal} = \case
     RunLocal wllt localAction -> do
-        (b, thread) <- raise $ raise $ interpRunLocal wllt localAction
-        modify @(SchedulerState a effs) (enqueueThisSlot thread)
-        _ <- yield @(ContinueWhen) @Slot (ThisSlot) id
+        (b, thread) <- raise $ interpRunLocal wllt localAction
+        let t = SuspendedThread{stWhen = ThisSlot, stThread=thread}
+        _ <- yield @(SuspendedThread a effs) @() t id
         pure b
     RunGlobal globalAction -> do
-        (b, thread) <- raise $ raise $ interpRunGlobal globalAction
-        modify @(SchedulerState a effs) (enqueueThisSlot thread)
-        _ <- yield @(ContinueWhen) @Slot (ThisSlot) id
+        (b, thread) <- raise $ interpRunGlobal globalAction
+        let t = SuspendedThread{stWhen = ThisSlot, stThread=thread}
+        _ <- yield @(SuspendedThread a effs) @() t id
         pure b
 
-data NextThread a effs =
-    ThreadInCurrentSlot (EmThread a effs)
-    | ThreadInNextSlot (EmThread a effs)
-    | NoMoreThreads
-
-handleResult ::
-    ContinueWhen
-    -> EmThread a effs
-    -> Eff (State (SchedulerState a effs) ': effs) ()
-handleResult waitUntil t =
-    case waitUntil of
-        ThisSlot -> modify (enqueueThisSlot t)
-        NextSlot _ -> modify (enqueueNextSlot t)
-
-nextThread :: Eff (State (SchedulerState a effs) ': effs) (NextThread a effs)
-nextThread = undefined
-
 runScheduler :: forall a effs.
-    (Slot -> Eff effs Slot)
-    -> Eff (Yield (ContinueWhen) Slot ': effs) ()
+    SimulatorInterpreter a effs
+    -> Eff (Yield (SuspendedThread a effs) () ': effs) ()
     -> Eff effs ()
-runScheduler onNextSlot e = runC e >>= (evalState initialState . loop)   where
-
-    loop :: Status effs (ContinueWhen) Slot () -> Eff (State (SchedulerState a effs) ': effs) ()
-    loop status = do
-        SchedulerState{currentSlot} <- get @(SchedulerState a effs)
-        _ <- case status of
-                Done () -> pure ()
-                Continue waitUntil k -> handleResult waitUntil (EmThread k)
-        nt <- nextThread
-        case nt of
-            (ThreadInCurrentSlot (EmThread k)) ->
-                raise (k currentSlot) >>= loop
-            (ThreadInNextSlot (EmThread k)) -> do
-                newSlot <- raise (onNextSlot currentSlot)
-                modify @(SchedulerState a effs) $ \s -> s {currentSlot = newSlot}
-                raise (k newSlot) >>= loop
-            (NoMoreThreads) -> pure () -- ?
-
--- | Run the threads round-robin style, advancing the clock whenever there is
---   nothing left to do in the current slot.
--- runScheduler :: forall a effs.
---     (Slot -> Eff effs ()) -- ^ What to do when a new slot starts
---     -> SchedulerState a effs -- ^ The scheduler
---     -> Eff effs ()
--- runScheduler onNextSlot s@SchedulerState{currentSlotActions, futureActions, currentSlot} = do
---     case currentSlotActions of
---         t@EmThread{emContinuation}:xs -> do
---             x' <- emContinuation currentSlot
---             let newState = case x' of
---                     Done () -> s{currentSlotActions = xs, futureActions = futureActions}
---                     Continue ThisSlot r -> s{currentSlotActions = xs ++ [t{emContinuation=r}], futureActions = futureActions}
---                     Continue (NextSlot _) r -> s{currentSlotActions = xs, futureActions = futureActions ++ [t{emContinuation=r}]}
---             runScheduler onNextSlot  newState
---         [] -> do
---              -- current slot is finished
---              let newSlot = currentSlot + 1
---                  newState = SchedulerState{currentSlotActions=futureActions, futureActions=[], currentSlot=newSlot}
---              onNextSlot newSlot
---              runScheduler onNextSlot newState
-
+runScheduler i e = loop [runC e] where
+    loop :: [Eff effs (Status effs (SuspendedThread a effs) () ())] -> Eff effs ()
+    loop readyQ = case readyQ of
+        [] -> pure ()
+        (x:xs) -> do
+            result <- x
+            case result of
+                Done _ -> loop xs
+                Continue (SuspendedThread{stWhen, stThread=EmThread t}) k -> do
+                    let thread' = runC $ interpret (handleEmulator i)  (raiseUnder @effs @(Simulator a) t)
+                    loop (xs ++ [thread', k ()])
