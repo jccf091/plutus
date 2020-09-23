@@ -112,5 +112,6 @@ let
     david = mkEnv "david" "eu-west-1";
     alpha = mkEnv "alpha" "eu-west-2";
     pablo = mkEnv "pablo" "eu-west-3";
+    wyohack = mkEnv "wyohack" "eu-central-1";
   };
 in envs // { inherit getCreds; }
